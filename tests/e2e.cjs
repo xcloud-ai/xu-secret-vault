@@ -1,10 +1,11 @@
-/* XU Secret Vault 0.1.1 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
+/* XU Secret Vault 0.1.3 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const MAIN = path.join(__dirname, '..', 'main.js');
 const VAULT_PATH = 'xu-secrets.enc';
@@ -48,6 +49,61 @@ async function waitFor(fn, label, timeout) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toBase64(bytes) {
+  return Buffer.from(bytes).toString('base64');
+}
+
+function fromBase64(text) {
+  return new Uint8Array(Buffer.from(String(text), 'base64'));
+}
+
+function tmpFiles() {
+  return Array.from(fileStore.keys()).filter((key) => key.indexOf(VAULT_PATH + '.tmp') === 0);
+}
+
+function bakFiles() {
+  return Array.from(fileStore.keys()).filter((key) => key.indexOf(VAULT_PATH + '.bak') === 0);
+}
+
+function conflictFiles() {
+  return Array.from(fileStore.keys()).filter((key) => key.indexOf('.conflict-') >= 0);
+}
+
+// 手工构造 v1（0.1.0）信封：AAD = xsv-aad-v1|1|PBKDF2-SHA512|600000|salt（不含 cipher.algo）
+async function buildLegacyV1Envelope(password, entries) {
+  const salt = webcrypto.getRandomValues(new Uint8Array(16));
+  const material = await subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password.normalize('NFC')),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveKey']
+  );
+  const key = await subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-512' },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const aad = new TextEncoder().encode(
+    ['xsv-aad-v1', 1, 'PBKDF2-SHA512', '600000', toBase64(salt)].join('|')
+  );
+  const plaintext = JSON.stringify({ version: 1, entries });
+  const ciphertext = await subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 },
+    key,
+    new TextEncoder().encode(plaintext)
+  );
+  return {
+    formatVersion: 1,
+    kdf: { algo: 'PBKDF2-SHA512', iterations: 600000, salt: toBase64(salt) },
+    cipher: { algo: 'AES-256-GCM', iv: toBase64(iv) },
+    payload: toBase64(ciphertext),
+  };
 }
 
 /* ---------------- 极简 DOM 桩 ---------------- */
@@ -163,6 +219,8 @@ const notices = [];
 let clipboard = '';
 let clipboardReadFailure = false;
 let writeBehavior = null; // null | 'throw-before' | 'throw-partial'
+let renameCorruptOnce = false; // 模拟 rename 后终检失败（用于测试 .bak 回滚）
+let afterReadHook = null; // 读取后注入外部改动（模拟 TOCTOU 窗口）
 let activePlugin = null;
 
 const app = {
@@ -171,7 +229,13 @@ const app = {
       exists: async (filePath) => fileStore.has(filePath) || createdDirs.has(filePath),
       read: async (filePath) => {
         if (!fileStore.has(filePath)) throw new Error('file not found: ' + filePath);
-        return fileStore.get(filePath);
+        const text = fileStore.get(filePath);
+        if (afterReadHook) {
+          const hook = afterReadHook;
+          afterReadHook = null;
+          hook(filePath, text);
+        }
+        return text;
       },
       write: async (filePath, text) => {
         if (writeBehavior === 'throw-before') throw new Error('simulated disk failure');
@@ -184,6 +248,13 @@ const app = {
       },
       rename: async (fromPath, toPath) => {
         if (!fileStore.has(fromPath)) throw new Error('rename source missing: ' + fromPath);
+        if (renameCorruptOnce) {
+          renameCorruptOnce = false;
+          // rename 成功但落盘内容损坏：触发 rename 后的终检失败与 .bak 回滚
+          fileStore.set(toPath, 'CORRUPTED');
+          fileStore.delete(fromPath);
+          return;
+        }
         fileStore.set(toPath, fileStore.get(fromPath));
         fileStore.delete(fromPath);
       },
@@ -195,6 +266,13 @@ const app = {
       mkdir: async (dirPath) => {
         createdDirs.add(dirPath);
       },
+      list: async (dirPath) => ({
+        files: Array.from(fileStore.keys()).filter((key) => {
+          const slash = key.lastIndexOf('/');
+          return slash < 0 ? dirPath === '' : key.slice(0, slash) === dirPath;
+        }),
+        folders: [],
+      }),
     },
   },
   workspace: {
@@ -372,7 +450,7 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.1.1',
+    version: '0.1.3',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
@@ -421,7 +499,7 @@ try {
   const createMs = Date.now() - createStart;
 
   ok(fileStore.has(VAULT_PATH), '创建后生成密文文件 ' + VAULT_PATH);
-  ok(!fileStore.has(VAULT_PATH + '.tmp'), '原子写完成后没有残留 .tmp');
+  ok(tmpFiles().length === 0, '原子写完成后没有残留 .tmp');
   ok(plugin.isUnlocked(), '创建后自动解锁');
   ok(plugin.sessionKey.extractable === false, '会话密钥 non-extractable');
   ok(plugin.sessionSalt.length === 16, '盐为 16 字节');
@@ -429,7 +507,7 @@ try {
   ok(plugin.settings.initializedPath === VAULT_PATH, '记录已初始化路径（用于区分首次使用与文件缺失）');
 
   const env0 = JSON.parse(fileStore.get(VAULT_PATH));
-  ok(env0.formatVersion === 1, '信封 formatVersion=1');
+  ok(env0.formatVersion === 2, '信封 formatVersion=2');
   ok(env0.kdf.algo === 'PBKDF2-SHA512', 'KDF 算法记录为 PBKDF2-SHA512');
   ok(Number(env0.kdf.iterations) === 600000, 'KDF 迭代数记录为 600000');
   ok(Buffer.from(env0.kdf.salt, 'base64').length === 16, '信封盐为 16 字节');
@@ -437,6 +515,33 @@ try {
   ok(env0.cipher.algo === 'AES-256-GCM', '加密算法记录为 AES-256-GCM');
   ok(!('entries' in env0), '信封中不存在明文 entries 字段');
   ok(!('updatedAt' in env0), '信封头不再明文暴露 updatedAt');
+
+  // 1b) 启动清理：只删本插件生成且超过 1 小时的 tmp，不得误删用户文件
+  const nowStamp = (() => {
+    const now = new Date();
+    const pad = (value) => String(value).padStart(2, '0');
+    return (
+      String(now.getFullYear()) +
+      pad(now.getMonth() + 1) +
+      pad(now.getDate()) +
+      '-' +
+      pad(now.getHours()) +
+      pad(now.getMinutes()) +
+      pad(now.getSeconds())
+    );
+  })();
+  fileStore.set(VAULT_PATH + '.tmp-20200101-000000-deadbeef', 'stale');
+  fileStore.set(VAULT_PATH + '.tmp-notes.md', 'user file, not ours');
+  fileStore.set(VAULT_PATH + '.tmp-20200101-000000-toolong123', 'invalid random length');
+  fileStore.set(VAULT_PATH + '.tmp-' + nowStamp + '-abcdef12', 'possibly in-flight');
+  await plugin.cleanupStaleTempFiles();
+  ok(!fileStore.has(VAULT_PATH + '.tmp-20200101-000000-deadbeef'), '启动清理删除超 1 小时的合法 tmp');
+  ok(fileStore.get(VAULT_PATH + '.tmp-notes.md') === 'user file, not ours', '用户文件 tmp-notes.md 不被误删');
+  ok(fileStore.has(VAULT_PATH + '.tmp-20200101-000000-toolong123'), '随机段超长的非本插件命名不被删除');
+  ok(fileStore.has(VAULT_PATH + '.tmp-' + nowStamp + '-abcdef12'), '1 小时内的 tmp（可能正在写）不被删除');
+  fileStore.delete(VAULT_PATH + '.tmp-notes.md');
+  fileStore.delete(VAULT_PATH + '.tmp-20200101-000000-toolong123');
+  fileStore.delete(VAULT_PATH + '.tmp-' + nowStamp + '-abcdef12');
 
   // 2) 通过 UI 新增条目
   const addButton = findButton(view.contentEl, '新增');
@@ -556,7 +661,8 @@ try {
   // hidden 超过 60 秒直接锁定
   documentStub.hidden = true;
   documentStub.fire('visibilitychange');
-  plugin.hiddenAt = Date.now() - 61000;
+  plugin.hiddenAt = plugin.nowMs() - 61000;
+  plugin.hiddenAtWall = Date.now() - 61000;
   plugin.checkAutoLock();
   ok(plugin.sessionKey === null, '后台超过 60 秒自动锁定');
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '负向：后台锁定后 DOM 不含明文');
@@ -589,9 +695,11 @@ try {
   restoreVault(goodEnvelopeText);
 
   const tamperedVersion = JSON.parse(goodEnvelopeText);
-  tamperedVersion.formatVersion = 2;
+  tamperedVersion.formatVersion = 3;
   restoreVault(JSON.stringify(tamperedVersion, null, 2));
-  ok((await unlockFresh(MASTER)) === false, '负向：版本不符被拒绝');
+  ok((await unlockFresh(MASTER)) === false, '负向：未知版本被拒绝');
+  ok(plugin.lastUnlockError === plugin.t('err_version_unsupported'), '未知版本明确提示「版本不支持」');
+  ok(plugin.lastUnlockError !== unified, '未知版本不与密码错误混同');
   restoreVault(goodEnvelopeText);
 
   restoreVault(String(goodEnvelopeText).slice(0, 120));
@@ -611,16 +719,26 @@ try {
   ok((await unlockFresh(MASTER)) === false, '负向：密文被篡改导致 GCM 校验失败');
   restoreVault(goodEnvelopeText);
 
+  // 9b) 文件超限：独立文案、不累计失败次数、不触发退避（状态错误不是密码错误）
+  restoreVault('x'.repeat(9 * 1024 * 1024));
+  plugin.lock();
+  restart();
+  ok((await plugin.unlock(MASTER)) === false, '负向：超过 8 MB 的保险库被拒绝读取');
+  ok(plugin.lastUnlockError === plugin.t('err_vault_too_large'), '超限文案与密码错误明确区分');
+  ok(plugin.lastUnlockError !== plugin.t('err_unlock_failed'), '超限不与密码错误混同');
+  ok(plugin.failureCount === 0 && plugin.getUnlockWaitSeconds() === 0, '超限不计入爆破退避，不罚用户等待');
+  restoreVault(goodEnvelopeText);
+
   // 10) 抗爆破：连续 5 次错误密码产生指数退避（K-09）
   restart();
   for (let attempt = 1; attempt <= 5; attempt += 1) {
-    const waitMs = Math.max(0, plugin.blockedUntil - Date.now());
+    const waitMs = Math.max(0, plugin.blockedUntil - plugin.nowMs());
     if (waitMs) await delay(waitMs + 40);
     const failed = await plugin.unlock('wrong-master-' + attempt);
     ok(failed === false, '第 ' + attempt + ' 次错误密码被拒绝');
   }
   ok(plugin.failureCount === 5, '连续失败累计 5 次');
-  ok(plugin.blockedUntil - Date.now() > 3000, '第 5 次失败后出现明显退避延迟');
+  ok(plugin.blockedUntil - plugin.nowMs() > 3000, '第 5 次失败后出现明显退避延迟');
   ok(plugin.getUnlockWaitSeconds() > 0, '退避期间返回剩余等待秒数');
   const blockedBefore = plugin.blockedUntil;
   restart();
@@ -631,16 +749,124 @@ try {
   ok(plugin.entries.length === 1 && plugin.entries[0].content === SECRET_TWO, '重新解锁后内容仍正确');
   ok(plugin.sessionKey.extractable === false, '重新解锁的密钥仍 non-extractable');
 
+  // 10b) 弹窗揭示明文后失焦：关闭弹窗、清屏、未重验不可读（G-08 / suspended）
+  view.render();
+  const modalEditButton = findButton(view.contentEl, '编辑');
+  ok(!!modalEditButton, '解锁列表提供编辑入口');
+  modalEditButton.click();
+  const entryModal = Array.from(plugin.openModals)[0];
+  ok(!!entryModal, '编辑弹窗已打开');
+  findButton(entryModal.contentEl, '显示').click();
+  ok(String(textOf(entryModal.contentEl)).indexOf(SECRET_TWO) >= 0, '弹窗中已揭示明文');
+  windowStub.fire('blur');
+  await delay(20);
+  ok(entryModal.isOpen === false && plugin.openModals.size === 0, '失焦后关闭本插件所有弹窗');
+  ok(String(textOf(entryModal.contentEl)).indexOf(SECRET_TWO) < 0, '负向：弹窗关闭后 DOM 不含明文');
+  ok(plugin.suspended === true, '失焦后进入挂起态');
+  ok(view.masked === true, '失焦后面板加遮罩');
+  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '负向：遮罩后 DOM 不含明文');
+  ok(plugin.sessionKey !== null, '挂起但未超时仍保留会话密钥');
+
+  // 遮罩期间命令入口与写操作一律拒绝
+  const addCommand = plugin.__commands.find((command) => command.id === 'new-entry');
+  ok(!!addCommand, '新增条目命令已注册');
+  addCommand.callback();
+  await delay(80);
+  ok(plugin.openModals.size === 0, '负向：遮罩期间执行「新增条目」命令被拒绝');
+  ok(notices.some((message) => message.indexOf('挂起') >= 0), '拒绝时提示需重新验证');
+  await rejects(
+    plugin.addEntry({ name: 'MaskedAdd', type: 'note', content: SECRET_ONE }),
+    '挂起',
+    '负向：遮罩期间写操作被拒绝'
+  );
+  clipboard = '';
+  await plugin.copySecret(SECRET_TWO);
+  ok(clipboard === '', '负向：遮罩期间复制被拒绝');
+  ok(plugin.entries.length === 1, '遮罩期间未写入任何新条目');
+
+  // 回前台（未超时）仍保持遮罩，必须重验
+  documentStub.hidden = false;
+  documentStub.fire('visibilitychange');
+  ok(view.masked === true, '回前台未重验时仍不可读');
+  const maskInput = findAll(view.contentEl, (el) => el.tagName === 'INPUT' && el.type === 'password')[0];
+  ok(!!maskInput, '遮罩界面提供重验输入框');
+  maskInput.value = MASTER;
+  findButton(view.contentEl, '验证并继续').click();
+  await waitFor(() => view.masked === false, '重验后恢复');
+  ok(view.masked === false && plugin.suspended === false, '重验成功后恢复可读');
+
+  // 10c) 重验连续错误：复用失败计数与指数退避，退避期间不做 KDF
+  windowStub.fire('blur');
+  ok(plugin.suspended === true, '再次失焦进入挂起态');
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const waitMs = Math.max(0, plugin.blockedUntil - plugin.nowMs());
+    if (waitMs) await delay(waitMs + 40);
+    ok((await plugin.reverify('wrong-' + attempt)) === false, '第 ' + attempt + ' 次重验错误被拒绝');
+  }
+  const reverifyBlocked = plugin.blockedUntil - plugin.nowMs();
+  ok(reverifyBlocked > 1000, '重验连续失败后出现指数退避');
+  const quickStart = Date.now();
+  ok((await plugin.reverify(MASTER)) === false, '退避期间正确密码也被拒绝');
+  ok(Date.now() - quickStart < 50, '退避期间立即返回，不付出 KDF 成本');
+  ok(plugin.lastReverifyError.indexOf('秒') >= 0, '退避提示包含剩余秒数');
+  await delay(reverifyBlocked + 60);
+  ok((await plugin.reverify(MASTER)) === true, '退避结束后正确密码可解除挂起');
+  ok(plugin.suspended === false && view.masked === false, '重验成功解除遮罩');
+
   // 11) 自动锁定同样清屏
   view.render();
   showSecret();
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '自动锁定前明文可见');
-  plugin.idleDeadline = Date.now() - 1;
+  plugin.idleDeadline = plugin.nowMs() - 1;
+  plugin.idleDeadlineWall = Date.now() - 1;
   plugin.checkAutoLock();
   ok(plugin.sessionKey === null, '自动锁定丢弃 CryptoKey');
   ok(plugin.entries.length === 0, '自动锁定清空内存条目');
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '负向：自动锁定后面板 DOM 不含明文');
   ok(notices.some((message) => message.indexOf('自动锁定') >= 0), '自动锁定给出用户提示');
+
+  // 11b) 多面板共享会话：已有解锁态面板时，新开面板必须以挂起态打开并需重验（M-11）
+  await unlockFresh(MASTER);
+  view.render();
+  await view.onOpen();
+  const leaf2 = { app, view: null };
+  const view2 = plugin.__viewFactories['xu-secret-vault-view'](leaf2);
+  leaf2.view = view2;
+  leaves.push(leaf2);
+  await view2.onOpen();
+  ok(view2.masked === true, '新开面板以挂起态打开，不直接显示内容');
+  ok(plugin.suspended === true, '新开面板触发挂起态');
+  ok(view.masked === true, '原面板同步进入遮罩');
+  ok(String(textOf(view2.contentEl)).indexOf(SECRET_TWO) < 0, '负向：新面板 DOM 不含明文');
+  ok(String(textOf(view2.contentEl)).indexOf('验证并继续') >= 0, '新面板要求重新验证主密码');
+  const panelPassword = findAll(view2.contentEl, (el) => el.tagName === 'INPUT' && el.type === 'password')[0];
+  ok(!!panelPassword, '新面板提供重验输入框');
+  panelPassword.value = MASTER;
+  findButton(view2.contentEl, '验证并继续').click();
+  await waitFor(() => view2.masked === false, '新面板重验通过');
+  ok(view2.masked === false && view.masked === false, '重验后两个面板同时解除遮罩');
+  ok(plugin.suspended === false, '重验后退出挂起态');
+  leaves.splice(leaves.indexOf(leaf2), 1);
+  await view2.onClose();
+
+  // 11c) 合盖休眠：单调钟（performance.now）不前进、墙钟前进 20 分钟 → 必须锁定（M-04）
+  await unlockFresh(MASTER);
+  view.render();
+  plugin.idleDeadline = plugin.nowMs() + 10 * 60000;
+  plugin.idleDeadlineWall = Date.now() - 20 * 60000;
+  plugin.checkAutoLock();
+  ok(plugin.sessionKey === null, '合盖唤醒后靠墙钟死线触发自动锁定');
+  ok(plugin.entries.length === 0, '合盖唤醒锁定后内存条目已清空');
+  ok(notices.some((message) => message.indexOf('自动锁定') >= 0), '合盖唤醒锁定给出提示');
+
+  // hiddenAt 的 60 秒判定同样取墙钟：单调钟只过了 1 秒，墙钟过了 61 秒
+  await unlockFresh(MASTER);
+  plugin.hiddenAt = plugin.nowMs() - 1000;
+  plugin.hiddenAtWall = Date.now() - 61000;
+  plugin.checkAutoLock();
+  ok(plugin.sessionKey === null, '后台 60 秒判定在休眠场景同样靠墙钟兜底');
+  plugin.hiddenAt = 0;
+  plugin.hiddenAtWall = 0;
 
   // 12) 删除（UI 二次确认），再次解锁确认已删除
   await unlockFresh(MASTER);
@@ -668,7 +894,7 @@ try {
       plugin.entries.some((entry) => entry.name === 'Concurrent-B'),
     '并发保存未丢失任何一次变更'
   );
-  ok(!fileStore.has(VAULT_PATH + '.tmp'), '并发保存后无残留 .tmp');
+  ok(tmpFiles().length === 0, '并发保存后无残留 .tmp');
 
   // 14) 原子写：模拟写到一半失败，旧 blob 必须完好且可解锁（D-02 / D-03）
   const beforeFailure = goodText();
@@ -682,31 +908,91 @@ try {
   writeBehavior = null;
   ok(plugin.entries.length === entriesBefore, '写盘失败后内存数据未更新');
   ok(goodText() === beforeFailure, '写盘失败后旧 blob 未被改动');
-  ok(!fileStore.has(VAULT_PATH + '.tmp'), '写盘失败后清理了 .tmp');
+  ok(tmpFiles().length === 0, '写盘失败后清理了 .tmp');
   plugin.lock();
   ok((await unlockFresh(MASTER)) === true, '写盘失败后旧 blob 仍可解锁');
   ok(plugin.entries.length === entriesBefore, '旧 blob 解锁后条目数量正确');
 
+  // 14b) rename 后终检失败：必须回滚 .bak，且 knownBlobHash 同步修正（D-02 / 回滚）
+  const beforeTerminal = goodText();
+  renameCorruptOnce = true;
+  await rejects(
+    plugin.addEntry({ name: 'Terminal', type: 'note', content: SECRET_ONE }),
+    '写入校验失败',
+    '负向：rename 后终检失败被识别'
+  );
+  renameCorruptOnce = false;
+  ok(goodText() === beforeTerminal, '终检失败后回滚到 .bak，旧密文恢复');
+  ok(bakFiles().length === 0, '回滚成功后清理 .bak');
+  ok(tmpFiles().length === 0, '终检失败后无残留 .tmp');
+  ok(plugin.entries.length === entriesBefore, '终检失败后内存条目未更新');
+  ok(
+    (await plugin.hashText(goodText())) === plugin.knownBlobHash,
+    '回滚后 knownBlobHash 已同步，避免下一次误判冲突'
+  );
+  plugin.lock();
+  ok((await unlockFresh(MASTER)) === true, '终检回滚后旧库仍可解锁');
+  ok(plugin.entries.length === entriesBefore, '终检回滚后条目内容仍正确');
+  view.render();
+
   // 15) 同步冲突：外部改动后拒绝覆盖，另存 conflict 副本（D-06 / S-02 / S-09）
+  const hashBeforeConflict = plugin.knownBlobHash;
   const externalText = goodText() + '\n';
   restoreVault(externalText);
   await plugin.addEntry({ name: 'Conflict', type: 'note', content: SECRET_THREE });
-  const conflicts = Array.from(fileStore.keys()).filter((key) => key.indexOf('.conflict-') >= 0);
+  const conflicts = conflictFiles();
   ok(conflicts.length === 1, '检测到外部改动后生成 conflict 副本');
   ok(goodText() === externalText, '拒绝覆盖外部改动后的原文件');
   ok(plugin.entries.length === entriesBefore, '冲突时本次改动未静默合并进内存');
-  ok(notices.some((message) => message.indexOf('外部修改') >= 0), '冲突时给出用户提示');
+  ok(plugin.conflictPending === true, '冲突后进入只读冲突态');
+  ok(notices.some((message) => message.indexOf('另存副本') >= 0), '冲突文案明确：已另存副本、原文件未覆盖');
   ok(String(fileStore.get(conflicts[0])).indexOf(SECRET_THREE) < 0, '负向：conflict 副本仍是密文');
-  restoreVault(goodText().replace(/\n$/, ''));
+  ok(plugin.knownBlobHash === hashBeforeConflict, '冲突副本写盘不污染 knownBlobHash（基线仍指向真实保险库）');
+  await rejects(
+    plugin.addEntry({ name: 'AfterConflict', type: 'note', content: SECRET_ONE }),
+    '重新加载',
+    '负向：冲突未重载前禁止继续编辑'
+  );
+  const reloaded = await plugin.reloadFromConflict();
+  ok(reloaded === true && plugin.conflictPending === false, '重新加载后解除冲突态');
+  ok(plugin.entries.length === entriesBefore, '重新加载后内存与磁盘一致');
 
-  // 16) 剪贴板读取失败时无条件清空（G-02）
+  // 15b) TOCTOU：加密/校验期间外部写入（rename 前复核）不得被静默覆盖
+  const raceBase = goodText();
+  const raceExternal = raceBase + '\n';
+  afterReadHook = (filePath) => {
+    if (filePath === VAULT_PATH) fileStore.set(VAULT_PATH, raceExternal);
+  };
+  const raceResult = await plugin.addEntry({ name: 'Race', type: 'note', content: SECRET_TWO });
+  afterReadHook = null;
+  ok(goodText() === raceExternal, '加密窗口内的外部写入未被静默覆盖');
+  ok(raceResult === false, 'TOCTOU 冲突时保存返回失败');
+  ok(plugin.conflictPending === true, 'TOCTOU 冲突同样进入只读冲突态');
+  ok(plugin.entries.length === entriesBefore, 'TOCTOU 冲突不更新内存快照');
+  ok(conflictFiles().length === 2, 'TOCTOU 冲突也另存副本');
+  ok((await plugin.reloadFromConflict()) === true && plugin.conflictPending === false, 'TOCTOU 冲突可重载恢复');
+
+
+  // 16) 剪贴板只在确认内容仍是本插件写入值时才清（G-02）
+  notices.length = 0;
   clipboard = '';
   await plugin.copySecret(SECRET_ONE);
   clipboardReadFailure = true;
-  await plugin.clearClipboardIfOwned(false);
+  await plugin.clearClipboardIfOwned(true);
   clipboardReadFailure = false;
-  ok(clipboard === '', '读剪贴板失败时仍无条件清空');
-  ok(notices.some((message) => message.indexOf('无条件清空') >= 0), '强清给出提示');
+  ok(clipboard === SECRET_ONE, '负向：读剪贴板失败时不清空，避免误删用户内容');
+  ok(notices.some((message) => message.indexOf('手动检查') >= 0), '读取失败时提示手动检查');
+
+  await plugin.copySecret(SECRET_ONE);
+  clipboard = 'USER-OWN-CLIPBOARD';
+  await plugin.clearClipboardIfOwned(true);
+  ok(clipboard === 'USER-OWN-CLIPBOARD', '负向：内容已被用户替换时不清空');
+
+  clipboard = '';
+  await plugin.copySecret(SECRET_ONE);
+  await plugin.clearClipboardIfOwned(true);
+  ok(clipboard === '', '确认仍为本插件写入值时清空');
+  ok(notices.some((message) => message.indexOf('剪贴板中的密钥已清空') >= 0), '确认清空后给出提示');
 
   // 17) 保险库文件缺失：错误态而不是引导重新创建（D-10 / S-05）
   plugin.lock();
@@ -744,6 +1030,84 @@ try {
   ok(settingsText.indexOf(SECRET_ONE) < 0 && settingsText.indexOf(SECRET_TWO) < 0, '设置对象不含条目明文');
   const savedText = JSON.stringify(plugin.__savedData);
   ok(savedText.indexOf(MASTER) < 0 && savedText.indexOf(SECRET_TWO) < 0, 'data.json 写入记录不含主密码或明文');
+
+  // 19b) v1 兼容读取与自动升级 / 未知版本明确提示（发社区前必须有）
+  const legacy = await buildLegacyV1Envelope(MASTER, [
+    {
+      id: 'legacy-1',
+      name: 'Legacy Entry',
+      type: 'note',
+      content: SECRET_ONE,
+      tags: ['legacy'],
+      note: '',
+      createdAt: '',
+      updatedAt: '',
+    },
+  ]);
+  restoreVault(JSON.stringify(legacy, null, 2));
+  plugin.lock();
+  restart();
+  ok((await plugin.unlock(MASTER)) === true, 'v1 旧信封可兼容解锁');
+  ok(plugin.entries.length === 1 && plugin.entries[0].content === SECRET_ONE, 'v1 条目内容正确');
+  const upgraded = JSON.parse(fileStore.get(VAULT_PATH));
+  ok(upgraded.formatVersion === 2, 'v1 读取成功后自动升级为 v2');
+  ok(notices.some((message) => message.indexOf('升级') >= 0), '升级给出提示');
+  ok(String(fileStore.get(VAULT_PATH)).indexOf(SECRET_ONE) < 0, '负向：升级后的密文不含明文');
+
+  const unknownVersion = JSON.parse(fileStore.get(VAULT_PATH));
+  unknownVersion.formatVersion = 3;
+  restoreVault(JSON.stringify(unknownVersion, null, 2));
+  plugin.lock();
+  restart();
+  ok((await plugin.unlock(MASTER)) === false, '负向：未知版本解锁被拒绝');
+  ok(plugin.lastUnlockError === plugin.t('err_version_unsupported'), '未知版本提示「版本不支持」');
+  ok(plugin.lastUnlockError !== plugin.t('err_unlock_failed'), '未知版本不和密码错误混同');
+  restoreVault(JSON.stringify(upgraded, null, 2));
+
+  // 19c) v1 升级失败：本次仍可解锁，失败提示只出现一次
+  restoreVault(JSON.stringify(legacy, null, 2));
+  plugin.lock();
+  restart();
+  notices.length = 0;
+  writeBehavior = 'throw-before';
+  ok((await plugin.unlock(MASTER)) === true, 'v1 升级写盘失败不影响本次解锁');
+  ok(notices.some((message) => message.indexOf('升级失败') >= 0), '升级失败给出一次提示');
+  ok(JSON.parse(fileStore.get(VAULT_PATH)).formatVersion === 1, '升级失败后继续使用旧格式');
+  plugin.lock();
+  restart();
+  notices.length = 0;
+  ok((await plugin.unlock(MASTER)) === true, '再次解锁 v1 仍成功');
+  ok(!notices.some((message) => message.indexOf('升级失败') >= 0), '升级失败提示不重复');
+  writeBehavior = null;
+  restoreVault(JSON.stringify(upgraded, null, 2));
+  plugin.lock();
+
+  // 19d) 冲突副本枚举与显式选择（S-07）：不自动挑选，选定后加载对应文件
+  for (const stale of conflictFiles()) fileStore.delete(stale);
+  const conflictCopy = VAULT_PATH.replace(/\.enc$/i, '') + '.conflict-20200101-000000.enc';
+  fileStore.set(conflictCopy, fileStore.get(VAULT_PATH));
+  await plugin.lock();
+  await plugin.scanVaultSources();
+  ok(plugin.vaultSources.length === 2, '解锁前枚举到正式库与冲突副本');
+  ok(plugin.vaultSources[0] === VAULT_PATH, '正式库排在首位');
+  ok(plugin.selectedVaultPath === '' && plugin.getVaultPath() === VAULT_PATH, '默认不自动挑选冲突副本');
+  view.render();
+  ok(String(textOf(view.contentEl)).indexOf('选择要加载的保险库文件') >= 0, '解锁界面显示候选库列表');
+  ok(String(textOf(view.contentEl)).indexOf('请确认要解锁的是哪一个文件') >= 0, '提示需由用户确认选择');
+  const sourceButton = findButton(view.contentEl, conflictCopy);
+  ok(!!sourceButton, '候选列表包含冲突副本');
+  sourceButton.click();
+  ok(plugin.selectedVaultPath === conflictCopy, '点击后显式选中冲突副本');
+  view.render();
+  const sourcePassword = findAll(view.contentEl, (el) => el.tagName === 'INPUT' && el.type === 'password')[0];
+  sourcePassword.value = MASTER;
+  findButton(view.contentEl, '解锁').click();
+  await waitFor(() => plugin.isUnlocked(), '加载所选冲突副本');
+  ok(plugin.entries.length === 1 && plugin.entries[0].content === SECRET_ONE, '从所选副本加载内容');
+  plugin.lock();
+  await plugin.scanVaultSources();
+  ok(plugin.selectedVaultPath === '' && plugin.getVaultPath() === VAULT_PATH, '锁定后选择回到正式库');
+  fileStore.delete(conflictCopy);
 
   // 20) crypto.subtle 不可用时明确报错
   plugin.lock();

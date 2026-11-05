@@ -219,6 +219,21 @@
   white-space: pre-wrap;
   word-break: break-all;
   user-select: text;
+  -webkit-user-drag: none;
+}
+
+.xsv-no-drag {
+  -webkit-user-drag: none;
+}
+
+.xsv-conflict-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--background-secondary);
+  border: 1px solid var(--text-error);
+  border-radius: 8px;
 }
 
 .xsv-masked {

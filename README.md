@@ -20,7 +20,9 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 新增/编辑使用弹窗；编辑写回前比对原值，无变化不写盘；删除需二次确认。
 - 复制到剪贴板后按设定秒数自动清空；若剪贴板已被替换则不会误删新内容。
 - 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦立即加遮罩并清屏，后台超过 60 秒直接锁定；锁定时清空面板明文、关闭正在编辑的弹窗、清空本插件复制的剪贴板内容并丢弃密钥。
-- 写盘采用「写 .tmp → 读回解密比对 → rename 原子替换」；写入失败保留旧文件。检测到文件被外部修改时拒绝覆盖，并另存 `*.conflict-时间戳.enc` 副本。
+- 写盘采用「写唯一 `.tmp` → 读回解密比对 → 留 `.bak` → rename 原子替换 → 终检 → 删 `.bak`」；任一步失败都保留或回滚旧文件，启动时清理本插件遗留的 `*.tmp*`。检测到文件被外部修改时拒绝覆盖，并另存 `*.conflict-时间戳.enc` 副本，冲突后必须先「重新加载」才能继续编辑。
+- 回到前台后的重新验证与解锁同等强度：重新付出完整 KDF 成本并解开会话挑战密文，不使用无盐哈希比对；连续错误复用同一套指数退避。
+- 信封格式升级为 v2，并保留 v1 兼容读取：旧信封解密成功后提示并自动升级为 v2；未知版本明确提示「版本不支持」，不会被误读成密码错误。
 - 连续解锁失败按指数退避（上限 30 秒），计数只在内存，重启清零。
 - 界面支持中文（默认）与 English。
 
@@ -35,7 +37,9 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - Add/edit via modal; unchanged edits are not written; deletion requires confirmation.
 - Clipboard is cleared automatically after a configurable delay, and only if it still holds the copied secret.
 - Auto-lock after 15 minutes idle by default; backgrounding or losing window focus masks the panel immediately, and more than 60 seconds in the background locks it.
-- Writes use "write .tmp, decrypt-verify, atomic rename"; failures keep the old file. External modifications are never overwritten and are saved as a `*.conflict-<timestamp>.enc` copy instead.
+- Writes use "write a unique .tmp, decrypt-verify, keep .bak, atomic rename, final verify, delete .bak"; any failure keeps or rolls back the old file, and stale `*.tmp*` files are cleaned at startup. External modifications are never overwritten and are saved as a `*.conflict-<timestamp>.enc` copy, which requires "Reload" before editing continues.
+- Re-verifying after returning to the foreground costs a full KDF derivation and decrypts an in-session challenge ciphertext; it never compares an unsalted hash, and repeated failures reuse the same exponential backoff.
+- The envelope format is now v2 with v1 compatibility reads: legacy envelopes are decrypted, announced and upgraded to v2 automatically; unknown versions report "unsupported version" instead of a password error.
 - Repeated unlock failures use exponential backoff capped at 30 seconds, kept in memory only.
 - UI language: Chinese (default) and English.
 
@@ -43,7 +47,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ### 方式一：从 Obsidian 社区目录安装
 
-当前版本 0.1.1 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
+当前版本 0.1.3 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
 
 ### 方式二：手动安装
 
@@ -102,15 +106,16 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 数据加密：AES-256-GCM，认证标签长度显式设为 128 位，每次写盘生成新的随机 12 字节 IV；整个条目集合作为整体加密。
 - 认证：`formatVersion`、KDF 算法、迭代数、盐与 `cipher.algo` 拼成规范化字符串作为 `additionalData`，任何头字段或算法名被篡改都会导致解密失败，避免把迭代数改小、替换盐或降级算法的攻击。
 - 密钥生命周期：派生密钥为 non-extractable，仅保存在内存；锁定、自动锁定、关闭面板或插件卸载时置空。主密码、密钥、明文均不写入 `data.json` 或任何配置文件。
-- 落盘校验：先写 `*.tmp`（内容仍是密文），读回后解密并逐字段比对，再 `rename` 原子替换目标文件；任何一步失败都会删除 tmp 并保留旧文件。
-- 同步冲突：记录上次读写的文件哈希，写前重新读取比对；发现文件被外部修改（或凭空出现/消失）时拒绝覆盖，把本次改动另存为 `xu-secrets.conflict-<时间戳>.enc` 并提示用户。
-- 抗爆破：连续解锁失败按指数退避（0.5 秒起，上限 30 秒），成功或重启后清零，计数只在内存。
-- 统一失败口径：文件缺失、JSON 畸形、base64 损坏、版本不符、密码错误对外都只给一条「解锁失败」文案，不向界面抛原始异常；文件缺失单独显示「找不到保险库」错误态，且不会引导重新创建。
+- 落盘校验：先写唯一命名的 `*.tmp`（内容仍是密文），读回后解密并逐字段比对，留 `.bak` 后 `rename` 原子替换，终检通过再删 `.bak`；任一步失败都会清理 tmp；若 rename 后终检失败，则用 `.bak` 回滚并同步修正哈希记录。启动时清理本插件遗留的 `*.tmp*`。
+- 同步冲突：记录上次读写的文件哈希；`rename` 前还会重取一次哈希复核（缩小 TOCTOU 窗口）。发现外部修改（或凭空出现/消失）时拒绝覆盖，把本次改动另存为 `xu-secrets.conflict-<时间戳>.enc`；内存快照标记为过期，弹窗与入口禁止继续编辑，必须点「重新加载」后才恢复。
+- 抗爆破：连续解锁失败按指数退避（0.5 秒起，上限 30 秒），成功或重启后清零，计数只在内存。回到前台后的重新验证同样付出完整 KDF 成本并受同一套退避约束，不使用无盐哈希比对。
+- 统一失败口径：文件缺失、JSON 畸形、base64 损坏、密码错误对外都只给一条「解锁失败」文案，不向界面抛原始异常；文件缺失单独显示「找不到保险库」错误态，且不会引导重新创建。仅「未知信封版本」单独提示「版本不支持」。
+- 版本兼容：信封格式为 v2（`xsv-aad-v2`）。读取时对 v1 信封先按 v2 AAD、再按 `xsv-aad-v1` 尝试；解密成功后提示并自动重写为 v2。未知版本直接拒绝并提示「版本不支持」。
 - 容量上限：保险库文件超过 8 MB 时拒绝读取与写入，避免超大文件导致解密与整体重加密卡死。
 
 ### 锁定的实际动作
 
-触发锁定（手动、自动、命令、关闭面板或在后台超过 60 秒）时，插件会同步执行：丢弃 CryptoKey 与内存中的条目集合、清空面板中所有已显形的明文、关闭所有正在编辑的弹窗、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。窗口失焦或切到后台时会先加全屏遮罩并清屏，回到前台后必须重新输入主密码才能继续查看。
+触发锁定（手动、自动、命令、关闭面板或在后台超过 60 秒）时，插件会同步执行：丢弃 CryptoKey 与内存中的条目集合、清空面板中所有已显形的明文、关闭所有正在编辑的弹窗（弹窗内容与条目对象一并丢弃）、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。窗口失焦或切到后台时会先关闭所有本插件弹窗、加全屏遮罩并清屏，回到前台后必须重新输入主密码才能继续查看；遮罩期间所有命令入口、写入与复制一律拒绝。
 
 ### 明文可能残留的其他位置
 
@@ -127,10 +132,35 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 大保险库（数千条目或超大私钥）每次保存都要整体重加密、解密比对与全文读回，保存耗时随数据量增长；超过 8 MB 直接拒绝。
 - 自动锁定由 15 秒一次的后台检查触发，实际精度取决于检查周期；任意面板交互会重置空闲计时。
 - 不做明文导出/另存为明文、不做主密码提示、不提供密码找回；这些是刻意的安全取舍。
-- 保险库文件被外部程序同时改写时，插件拒绝覆盖并生成 conflict 副本，不会自动合并；需要用户自行比对两份文件。
+- 保险库文件被外部程序同时改写时，插件拒绝覆盖并生成 conflict 副本，不会自动合并；冲突后进入只读态，必须「重新加载」才能继续编辑，需要用户自行比对两份文件。
+- v1 兼容读取并升级为 v2 后，旧版插件将无法再读取该文件；升级前请先备份副本。
 - 备份方式就是复制 `xu-secrets.enc` 这个密文文件本身；不需要也不应该导出明文。恢复时把该文件放回原路径即可。
 
 ## 版本记录
+
+### 0.1.3
+
+- 跨休眠计时：空闲与后台 60 秒判定同时记录墙钟死线与单调钟死线，取两者较大值。合盖休眠期间 `performance.now()` 不前进，唤醒后由墙钟兜底触发锁定；系统时间被回拨时由单调钟兜底。
+- 多面板隔离：已有解锁态面板时，新开面板一律以挂起态打开并要求重新验证主密码，不再共享会话。
+- 冲突副本显式选择：解锁前枚举同 stem 的 `*.conflict-*.enc`，在解锁界面列出候选文件；默认仍选正式库，绝不自动挑选，选定后从所选文件加载。
+- 临时文件清理收紧：只匹配本插件生成的 `*.tmp-YYYYMMDD-HHMMSS-<1~8位随机>` 命名，且只清理超过 1 小时的残留，避免误删用户文件或另一实例正在写的 tmp。
+- 回滚改为「先写 tmp 再 rename」；回滚失败时保留 `.bak`，并在错误文案中给出恢复路径。
+- 冲突副本写盘不再更新 `knownBlobHash` 基线，避免后续读写指向副本。
+- 重新验证在 KDF 返回后复查会话 generation，KDF 期间被锁定不会误清挂起态。
+- 超限文件（> 8 MB）使用独立错误文案，不计入失败次数、不触发退避。
+- 剪贴板无法读取或内容已被替换时不再清空，只提示手动检查；仅当读到的内容确为本插件写入值时才清。
+- v1 升级失败只提示一次「升级失败，继续使用旧格式」，不再每次解锁重复打扰。
+- 删除确认弹窗关闭时释放持有的条目对象。
+
+### 0.1.2
+
+- 遮罩加固：失焦/切后台时关闭本插件所有弹窗，确保已揭示明文立刻不可见；遮罩期间命令入口、写入与复制全部拒绝（`suspended` 校验）。
+- 重新验证改为与解锁同强度：用会话盐重新派生密钥并解开会话挑战密文，复用失败计数与指数退避，不再使用无盐哈希比对。
+- 信封升级为 v2（`xsv-aad-v2`）；支持 v1 兼容读取并自动升级；未知版本提示「版本不支持」而非密码错误。
+- 写入加固：rename 前复查 generation 与文件哈希（TOCTOU）；rename 前留 `.bak`，终检失败自动回滚并修正哈希记录；`.tmp` 改唯一命名并在启动时清理残留。
+- 冲突分支改为只读冲突态：明确提示「已另存副本、原文件未覆盖」，内存快照不更新，必须「重新加载」才能继续编辑。
+- 创建保险库在 rename 前再次检查文件是否存在，避免 exists→rename 竞态覆盖旧库。
+- 编辑弹窗关闭后释放条目对象；揭示后提供「再次隐藏」；退避与空闲计时改用单调时钟；列表内容阻止拖拽；剪贴板清空前再确认一次。
 
 ### 0.1.1
 
@@ -145,10 +175,10 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ## 技术说明（纯中文）
 
-- 文件格式：单个 JSON 信封，字段为 `formatVersion`、`kdf { algo, iterations, salt }`、`cipher { algo, iv }`、`payload`（base64 密文）。`updatedAt` 与条目一起放在加密载荷内，不在信封头明文暴露。
-- 每次保存都会重新生成 IV，盐在保险库生命周期内保持不变；创建新保险库时才生成新盐。
-- 写盘使用 Obsidian 的 vault adapter：确保父目录存在 → 写 `*.tmp` → 读回解密逐字段比对 → `rename` 原子替换 → 再次读回校验。
-- 写盘前会用 SHA-256 哈希比对当前磁盘内容；与上次读写记录不一致即判定外部修改。
+- 文件格式：单个 JSON 信封，字段为 `formatVersion`（当前 2）、`kdf { algo, iterations, salt }`、`cipher { algo, iv }`、`payload`（base64 密文）。`updatedAt` 与条目一起放在加密载荷内，不在信封头明文暴露。
+- 每次保存都会重新生成 IV，盐在保险库生命周期内保持不变；创建新保险库时才生成新盐。v1 信封读取成功后会自动重写为 v2。
+- 写盘使用 Obsidian 的 vault adapter：确保父目录存在 → 写唯一命名的 `*.tmp` → 读回解密逐字段比对 → 写 `.bak` → `rename` 原子替换 → 再次读回校验 → 删除 `.bak`；失败时按需回滚并清理。
+- 写盘前与 `rename` 前都会用 SHA-256 哈希比对当前磁盘内容；与上次读写记录不一致即判定外部修改。
 - 自动锁定由 15 秒一次的后台检查触发；任意面板交互（含弹窗输入）会重置空闲计时。
 - 插件不注册网络请求、不访问外部服务，日志统一使用 `[xu-secret-vault]` 前缀。
 
