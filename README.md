@@ -3,42 +3,47 @@
 > [!NOTE]
 > **密钥保险库**：在本地加密保存密码、API 密钥与私钥。
 
-这是一个把敏感凭据集中存放在单个加密文件里的 Obsidian 插件。插件打开一个侧边栏面板，首次使用时设置主密码；之后所有条目以整体加密的形式写入 `xu-secrets.enc`，明文只存在于内存与界面中，锁定后立即从内存清除。插件不发起任何网络请求，也不把主密码、派生密钥或明文写入 `data.json`、笔记或其它明文文件。
+这是一个把敏感凭据集中存放在单个加密文件里的 Obsidian 桌面端插件。插件打开一个侧边栏面板，首次使用时设置主密码；之后所有条目以整体加密的形式写入 `xu-secrets.enc`，明文只存在于内存与界面中，锁定后立即从内存清除。插件不发起任何网络请求，也不把主密码、派生密钥或明文写入 `data.json`、笔记或其它明文文件。
 
 > English description below for review purposes. / 以下为英文说明，用于过审。
 
-XU Secret Vault keeps passwords, API keys and private keys in a single locally encrypted file. On first use it asks for a master password; the whole entry set is then encrypted as one blob and written to `xu-secrets.enc`. Plaintext exists only in memory and the UI, and is cleared as soon as the vault is locked. The plugin makes no network requests and never writes the master password, derived key or plaintext to `data.json`, notes or any plaintext file.
+XU Secret Vault keeps passwords, API keys and private keys in a single locally encrypted file. It is a desktop-only plugin: on first use it asks for a master password, then the whole entry set is encrypted as one blob and written to `xu-secrets.enc`. Plaintext exists only in memory and the UI, and is cleared as soon as the vault is locked. The plugin makes no network requests and never writes the master password, derived key or plaintext to `data.json`, notes or any plaintext file.
 
 ## 功能特性
 
 - 单文件加密保险库：默认 `xu-secrets.enc`，路径可在设置中修改，非 `.enc` 后缀会自动补全。
 - PBKDF2-HMAC-SHA512（600,000 次）派生 AES-256-GCM 密钥，随机 16 字节盐与每次写盘随机 12 字节 IV。
-- 信封头参数（版本、KDF 算法、迭代数、盐）参与 GCM 认证（AAD），篡改文件头会导致解密失败。
+- 信封头参数（版本、KDF 算法、迭代数、盐）与加密算法一起参与 GCM 认证（AAD），篡改文件头或算法名会导致解密失败。
 - 会话密钥为 non-extractable CryptoKey，仅驻留内存；锁定、关闭插件或自动锁定后立即丢弃。
-- 列表默认只显示名称、类型与标签；内容需点击「显示」才出现在界面上，备注仅在编辑弹窗中可见。
+- 列表默认只显示名称、类型与标签；内容需点击「显示」才出现在界面上，备注仅在编辑弹窗中可见；编辑弹窗的明文同样默认掩码。
 - 支持密码、API 密钥、私钥、备注四种条目类型，支持标签与搜索。
 - 新增/编辑使用弹窗；编辑写回前比对原值，无变化不写盘；删除需二次确认。
 - 复制到剪贴板后按设定秒数自动清空；若剪贴板已被替换则不会误删新内容。
-- 自动锁定（默认 5 分钟无操作）；锁定时清空面板明文、关闭正在编辑的弹窗、清空本插件复制的剪贴板内容并丢弃密钥。
+- 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦立即加遮罩并清屏，后台超过 60 秒直接锁定；锁定时清空面板明文、关闭正在编辑的弹窗、清空本插件复制的剪贴板内容并丢弃密钥。
+- 写盘采用「写 .tmp → 读回解密比对 → rename 原子替换」；写入失败保留旧文件。检测到文件被外部修改时拒绝覆盖，并另存 `*.conflict-时间戳.enc` 副本。
+- 连续解锁失败按指数退避（上限 30 秒），计数只在内存，重启清零。
 - 界面支持中文（默认）与 English。
 
 ### Features
 
 - A single encrypted vault file (default `xu-secrets.enc`, path configurable).
 - PBKDF2-HMAC-SHA512 (600,000 iterations) derives an AES-256-GCM key, with a random 16-byte salt and a fresh 12-byte IV on every write.
-- Envelope header parameters (version, KDF algorithm, iterations, salt) are authenticated as AES-GCM additional data, so header tampering breaks decryption.
+- Envelope header parameters (version, KDF algorithm, iterations, salt) are authenticated together with the cipher algorithm as AES-GCM additional data, so header tampering breaks decryption.
 - The session key is a non-extractable CryptoKey kept only in memory and dropped on lock, unload or auto-lock.
-- The list shows only name, type and tags; content appears only after clicking "Show", while the note is visible in the edit modal.
+- The list shows only name, type and tags; content appears only after clicking "Show", while the note is visible in the edit modal and entry content is masked by default there too.
 - Password, API key, private key and note entry types, with tags and search.
 - Add/edit via modal; unchanged edits are not written; deletion requires confirmation.
 - Clipboard is cleared automatically after a configurable delay, and only if it still holds the copied secret.
-- Auto-lock after an idle period; locking clears on-screen plaintext, closes open edit modals, clears the plugin's clipboard content and discards the key.
+- Auto-lock after 15 minutes idle by default; backgrounding or losing window focus masks the panel immediately, and more than 60 seconds in the background locks it.
+- Writes use "write .tmp, decrypt-verify, atomic rename"; failures keep the old file. External modifications are never overwritten and are saved as a `*.conflict-<timestamp>.enc` copy instead.
+- Repeated unlock failures use exponential backoff capped at 30 seconds, kept in memory only.
+- UI language: Chinese (default) and English.
 
 ## 安装
 
 ### 方式一：从 Obsidian 社区目录安装
 
-当前版本 0.1.0 为本地开发版，尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
+当前版本 0.1.1 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
 
 ### 方式二：手动安装
 
@@ -60,8 +65,8 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 2. 首次使用：在侧边栏输入两次主密码，点击「创建保险库」。主密码不会写入磁盘，忘记后无法恢复。
 3. 解锁后点击「新增」，填写名称、类型、标签、内容与备注并保存。
 4. 需要查看内容时点击条目上的「显示」；点击「复制」可复制内容，剪贴板会在设定秒数后自动清空。
-5. 点击「编辑」修改条目；点击「删除」并在确认弹窗中确认。
-6. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。
+5. 点击「编辑」修改条目（内容默认掩码，点「显示」后才呈现）；点击「删除」并在确认弹窗中确认。
+6. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，后台超过 60 秒会自动锁定。
 
 ### 首次使用
 
@@ -77,7 +82,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 | --- | --- | --- |
 | 界面语言 | 中文 | 切换中文 / English。 |
 | 保险库文件路径 | `xu-secrets.enc` | 相对 vault 根目录；必须以 `.enc` 结尾，缺失时自动补全。 |
-| 自动锁定（分钟） | 5 | 无操作超过该时长后自动锁定并清除内存明文。 |
+| 自动锁定（分钟） | 15 | 无操作超过该时长后自动锁定并清除内存明文；切后台超过 60 秒也会锁定。 |
 | 剪贴板清空（秒） | 30 | 复制密钥后自动清空剪贴板；剪贴板已被替换时不会覆盖。 |
 | 立即锁定 | — | 清除内存中的密钥与明文，需要重新输入主密码。 |
 
@@ -93,15 +98,19 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ### 加密设计
 
-- 密钥派生：PBKDF2-HMAC-SHA512，600,000 次迭代，随机 16 字节盐；盐与迭代数写入信封头并参与 GCM 认证。
-- 数据加密：AES-256-GCM，每次写盘生成新的随机 12 字节 IV；整个条目集合作为整体加密。
-- 认证：`formatVersion`、KDF 算法、迭代数与盐拼成规范化字符串作为 `additionalData`，任何头字段被篡改都会导致解密失败，避免把迭代数改小或替换盐的降级攻击。
-- 密钥生命周期：派生密钥为 non-extractable，仅保存在内存；锁定、自动锁定、插件卸载时置空。主密码、密钥、明文均不写入 `data.json` 或任何配置文件。
-- 落盘校验：每次写盘后立即读回比对全文，不一致则报错且不更新内存数据。
+- 密钥派生：PBKDF2-HMAC-SHA512，600,000 次迭代，随机 16 字节盐；盐与迭代数写入信封头并参与 GCM 认证。主密码在派生前先做 Unicode NFC 归一化，不同平台/输入法下的等价字符会得到一致结果；因此请保持输入法不做额外的全半角或形近字符改写。
+- 数据加密：AES-256-GCM，认证标签长度显式设为 128 位，每次写盘生成新的随机 12 字节 IV；整个条目集合作为整体加密。
+- 认证：`formatVersion`、KDF 算法、迭代数、盐与 `cipher.algo` 拼成规范化字符串作为 `additionalData`，任何头字段或算法名被篡改都会导致解密失败，避免把迭代数改小、替换盐或降级算法的攻击。
+- 密钥生命周期：派生密钥为 non-extractable，仅保存在内存；锁定、自动锁定、关闭面板或插件卸载时置空。主密码、密钥、明文均不写入 `data.json` 或任何配置文件。
+- 落盘校验：先写 `*.tmp`（内容仍是密文），读回后解密并逐字段比对，再 `rename` 原子替换目标文件；任何一步失败都会删除 tmp 并保留旧文件。
+- 同步冲突：记录上次读写的文件哈希，写前重新读取比对；发现文件被外部修改（或凭空出现/消失）时拒绝覆盖，把本次改动另存为 `xu-secrets.conflict-<时间戳>.enc` 并提示用户。
+- 抗爆破：连续解锁失败按指数退避（0.5 秒起，上限 30 秒），成功或重启后清零，计数只在内存。
+- 统一失败口径：文件缺失、JSON 畸形、base64 损坏、版本不符、密码错误对外都只给一条「解锁失败」文案，不向界面抛原始异常；文件缺失单独显示「找不到保险库」错误态，且不会引导重新创建。
+- 容量上限：保险库文件超过 8 MB 时拒绝读取与写入，避免超大文件导致解密与整体重加密卡死。
 
 ### 锁定的实际动作
 
-触发锁定（手动、自动或命令）时，插件会同步执行：丢弃 CryptoKey 与内存中的条目集合、清空面板中所有已显形的明文、关闭所有正在编辑的弹窗、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。随后面板回到锁定态，需要重新输入主密码。
+触发锁定（手动、自动、命令、关闭面板或在后台超过 60 秒）时，插件会同步执行：丢弃 CryptoKey 与内存中的条目集合、清空面板中所有已显形的明文、关闭所有正在编辑的弹窗、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。窗口失焦或切到后台时会先加全屏遮罩并清屏，回到前台后必须重新输入主密码才能继续查看。
 
 ### 明文可能残留的其他位置
 
@@ -114,17 +123,33 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ### 已知限制
 
-- 手机端 WebView 的 `crypto.subtle` 兼容性尚未实测；插件会在不可用时明确报错并拒绝启动加解密，而不是静默降级。
-- 大保险库（数千条目或超大私钥）每次保存都要整体重加密与全文读回校验，保存耗时随数据量增长。
+- 桌面端限定（`isDesktopOnly: true`）：手机端 WebView 的 `crypto.subtle` 与剪贴板 `readText` 均未实测，因此不宣称移动端可用；后续实测通过再放开。
+- 大保险库（数千条目或超大私钥）每次保存都要整体重加密、解密比对与全文读回，保存耗时随数据量增长；超过 8 MB 直接拒绝。
+- 自动锁定由 15 秒一次的后台检查触发，实际精度取决于检查周期；任意面板交互会重置空闲计时。
 - 不做明文导出/另存为明文、不做主密码提示、不提供密码找回；这些是刻意的安全取舍。
-- 保险库文件被外部程序同时改写时，写回校验会报错并保留内存中的旧数据，需重新解锁再操作。
+- 保险库文件被外部程序同时改写时，插件拒绝覆盖并生成 conflict 副本，不会自动合并；需要用户自行比对两份文件。
+- 备份方式就是复制 `xu-secrets.enc` 这个密文文件本身；不需要也不应该导出明文。恢复时把该文件放回原路径即可。
+
+## 版本记录
+
+### 0.1.1
+
+- 实证审计加固：信封参数（含 `cipher.algo`）纳入 AAD，显式 128 位认证标签。
+- 原子写与并发串行化：写 `.tmp` → 读回解密逐字段比对 → `rename`；两次快速保存不再互相覆盖。
+- 外部修改检测：哈希不一致时拒绝覆盖并另存 conflict 副本。
+- 切后台遮罩、失焦遮罩、后台 60 秒自动锁定、回到前台需重新验证主密码；关闭面板即锁定。
+- 锁定/写盘失败不再误报「已保存」；解锁失败统一文案并加入指数退避；密码 NFC 归一化。
+- 编辑弹窗内容默认掩码；输入框关闭拼写检查与自动填充，并阻止拖拽。
+- 保险库缺失改为错误态，不再引导重新创建；加入 8 MB 上限；`updatedAt` 移入加密载荷。
+- 自动锁定默认改为 15 分钟；插件改为桌面端限定。
 
 ## 技术说明（纯中文）
 
-- 文件格式：单个 JSON 信封，字段为 `formatVersion`、`kdf { algo, iterations, salt }`、`cipher { algo, iv }`、`updatedAt`、`payload`（base64 密文）。密文内容为 `{ version, entries }` 的 JSON。
+- 文件格式：单个 JSON 信封，字段为 `formatVersion`、`kdf { algo, iterations, salt }`、`cipher { algo, iv }`、`payload`（base64 密文）。`updatedAt` 与条目一起放在加密载荷内，不在信封头明文暴露。
 - 每次保存都会重新生成 IV，盐在保险库生命周期内保持不变；创建新保险库时才生成新盐。
-- 写盘使用 Obsidian 的 vault adapter，先确保父目录存在，写入后立即读回并做 JSON 结构校验。
-- 自动锁定由 15 秒一次的后台检查触发，实际精度取决于检查周期；任意面板交互会重置空闲计时。
+- 写盘使用 Obsidian 的 vault adapter：确保父目录存在 → 写 `*.tmp` → 读回解密逐字段比对 → `rename` 原子替换 → 再次读回校验。
+- 写盘前会用 SHA-256 哈希比对当前磁盘内容；与上次读写记录不一致即判定外部修改。
+- 自动锁定由 15 秒一次的后台检查触发；任意面板交互（含弹窗输入）会重置空闲计时。
 - 插件不注册网络请求、不访问外部服务，日志统一使用 `[xu-secret-vault]` 前缀。
 
 ## 许可证

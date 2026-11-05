@@ -11,16 +11,23 @@ const FORMAT_VERSION = 1;
 const KDF_ALGO = 'PBKDF2-SHA512';
 const KDF_HASH = 'SHA-512';
 const KDF_ITERATIONS = 600000;
-const AAD_PREFIX = 'xsv-aad-v1';
+const AAD_PREFIX = 'xsv-aad-v2';
+const CIPHER_ALGO = 'AES-256-GCM';
+const TAG_LENGTH = 128;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
+const MAX_VAULT_BYTES = 8 * 1024 * 1024;
+const HIDDEN_LOCK_MS = 60000;
+const BACKOFF_BASE_MS = 500;
+const BACKOFF_MAX_MS = 30000;
 const ENTRY_TYPES = ['password', 'api-key', 'private-key', 'note'];
 
 const DEFAULT_SETTINGS = {
   language: 'zh',
   vaultPath: DEFAULT_VAULT_PATH,
-  autoLockMinutes: 5,
+  autoLockMinutes: 15,
   clipboardClearSeconds: 30,
+  initializedPath: '',
 };
 
 const I18N = {
@@ -97,7 +104,7 @@ const I18N = {
     setting_vault_path: '保险库文件路径',
     setting_vault_path_desc: '相对 vault 根目录的路径，必须以 .enc 结尾（缺失时自动补全）。默认 xu-secrets.enc。',
     setting_auto_lock: '自动锁定（分钟）',
-    setting_auto_lock_desc: '无操作超过该时长后自动锁定，并清除内存中的密钥与明文。',
+    setting_auto_lock_desc: '无操作超过该时长后自动锁定（默认 15 分钟）；切到后台超过 60 秒也会立即锁定，并清除内存中的密钥与已显形的明文。',
     setting_clipboard_clear: '剪贴板清空（秒）',
     setting_clipboard_clear_desc: '复制密钥后经过该时长自动清空剪贴板；若期间剪贴板已被替换则不会覆盖新内容。',
     setting_lock_now: '立即锁定',
@@ -107,6 +114,20 @@ const I18N = {
     setting_docs_desc: '在 GitHub 查看完整使用与安全说明。',
     btn_github: 'GitHub',
     status_loading: '正在读取保险库状态…',
+    btn_retry: '重试',
+    err_vault_missing: '找不到保险库文件。请在设置中检查路径，或从备份恢复；插件不会自动创建新库，以免覆盖同名旧文件。',
+    err_vault_unreadable: '无法读取保险库文件（可能是权限或磁盘错误）。请检查文件后再试。',
+    err_vault_too_large: '保险库文件超过 8 MB 上限，已拒绝读取。请拆分条目或改用更小的文件。',
+    err_vault_exists: '目标路径已存在保险库文件，已拒绝创建以免覆盖。请先备份或改名。',
+    err_unlock_backoff: '尝试次数过多，请在 {seconds} 秒后重试。',
+    err_save_discarded: '保险库已锁定或写入被丢弃，本次修改未保存。',
+    notice_conflict: '检测到保险库文件被外部修改，已拒绝覆盖；本次改动另存为 {path}。',
+    notice_clipboard_forced: '无法读取剪贴板，已无条件清空以防明文残留。',
+    notice_background_locked: '插件在后台超过 60 秒，保险库已自动锁定。',
+    notice_reverify_failed: '验证失败，请重新输入主密码。',
+    mask_title: '内容已隐藏',
+    mask_desc: '窗口失去焦点或切到后台，面板已加上遮罩并清除已显形的明文。请输入主密码继续查看。',
+    btn_reverify: '验证并继续',
   },
   en: {
     cmd_open: 'Open secret vault',
@@ -181,7 +202,7 @@ const I18N = {
     setting_vault_path: 'Vault file path',
     setting_vault_path_desc: 'Path relative to the vault root. It must end with .enc (added automatically if missing). Default: xu-secrets.enc.',
     setting_auto_lock: 'Auto-lock (minutes)',
-    setting_auto_lock_desc: 'Lock automatically after this idle period and clear keys and plaintext from memory.',
+    setting_auto_lock_desc: 'Lock automatically after this idle period (default 15 minutes). Moving to the background for more than 60 seconds also locks immediately and clears keys and revealed plaintext from memory.',
     setting_clipboard_clear: 'Clipboard clear (seconds)',
     setting_clipboard_clear_desc: 'Clear the clipboard after copying a secret. If the clipboard has been replaced meanwhile, the new content is left untouched.',
     setting_lock_now: 'Lock now',
@@ -191,6 +212,20 @@ const I18N = {
     setting_docs_desc: 'View the full usage and security guide on GitHub.',
     btn_github: 'GitHub',
     status_loading: 'Reading vault state…',
+    btn_retry: 'Retry',
+    err_vault_missing: 'Vault file not found. Check the path in settings or restore from a backup. The plugin will not create a new vault automatically, to avoid overwriting an existing file with the same name.',
+    err_vault_unreadable: 'The vault file could not be read (permissions or disk error). Check the file and try again.',
+    err_vault_too_large: 'The vault file exceeds the 8 MB limit and was not read. Split the entries or use a smaller file.',
+    err_vault_exists: 'A vault file already exists at the target path; creation was refused to avoid overwriting it. Back it up or rename it first.',
+    err_unlock_backoff: 'Too many attempts. Try again in {seconds}s.',
+    err_save_discarded: 'The vault is locked or the write was discarded, so this change was not saved.',
+    notice_conflict: 'The vault file was modified externally, so overwriting was refused. This change was saved as {path}.',
+    notice_clipboard_forced: 'The clipboard could not be read; it was cleared unconditionally to avoid leaking plaintext.',
+    notice_background_locked: 'The plugin was in the background for over 60 seconds, so the vault was locked.',
+    notice_reverify_failed: 'Verification failed. Enter the master password again.',
+    mask_title: 'Content hidden',
+    mask_desc: 'The window lost focus or moved to the background, so the panel is masked and revealed plaintext was cleared. Enter the master password to continue.',
+    btn_reverify: 'Verify and continue',
   },
 };
 
@@ -231,10 +266,10 @@ function randomBytes(cryptoObj, length) {
   return bytes;
 }
 
-// 信封头参数参与 AES-GCM 认证，防止篡改迭代数 / salt / 版本实现降级攻击
-function buildAad(formatVersion, algo, iterations, saltBase64) {
+// 信封头参数（含 cipher.algo）参与 AES-GCM 认证，防止篡改迭代数 / salt / 版本 / 算法实现降级攻击
+function buildAad(formatVersion, kdfAlgo, iterations, saltBase64, cipherAlgo) {
   return utf8Encode(
-    AAD_PREFIX + '|' + formatVersion + '|' + algo + '|' + String(iterations) + '|' + saltBase64
+    [AAD_PREFIX, formatVersion, kdfAlgo, String(iterations), saltBase64, cipherAlgo].join('|')
   );
 }
 
@@ -247,6 +282,28 @@ function delay(ms) {
 function errorMessage(error) {
   if (!error) return 'unknown error';
   return String(error.message || error);
+}
+
+// 主密码先做 Unicode NFC 归一化，避免同一密码在不同输入法/平台下派生结果不一致
+function normalizePassword(value) {
+  return String(value == null ? '' : value).normalize('NFC');
+}
+
+function sameJson(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function fileStamp(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return (
+    date.getFullYear() +
+    pad(date.getMonth() + 1) +
+    pad(date.getDate()) +
+    '-' +
+    pad(date.getHours()) +
+    pad(date.getMinutes()) +
+    pad(date.getSeconds())
+  );
 }
 
 function sanitizeTags(input) {
@@ -398,7 +455,7 @@ class SecretVaultSettingTab extends PluginSettingTab {
     }
     if (key === 'autoLockMinutes') this.plugin.resetIdleTimer();
     if (key === 'vaultPath') {
-      this.plugin.vaultExists = null;
+      this.plugin.vaultState = 'unknown';
       this.plugin.refreshViews();
     }
   }
@@ -415,6 +472,7 @@ class SecretVaultView extends ItemView {
     this.revealed = new Set();
     this.uiError = '';
     this.detecting = false;
+    this.masked = false;
   }
 
   getViewType() {
@@ -437,18 +495,34 @@ class SecretVaultView extends ItemView {
     void this.ensureVaultState();
   }
 
-  async onClose() {}
+  // 关闭面板即清屏并锁定，避免"关了但视图仍缓存明文"
+  async onClose() {
+    this.clearSensitive();
+    this.masked = false;
+    this.plugin.lock();
+  }
 
   // 锁定时同步清屏：立即移除已显形的明文，而不是只丢缓存
   clearSensitive() {
     this.revealed.clear();
     this.query = '';
     this.uiError = '';
+    this.masked = false;
     if (this.contentEl) this.contentEl.empty();
   }
 
+  // 切后台/失焦：立刻加遮罩并清屏，回到前台需重新验证主密码
+  maskSensitive() {
+    if (!this.plugin.isUnlocked()) return;
+    this.revealed.clear();
+    this.query = '';
+    this.masked = true;
+    if (this.contentEl) this.contentEl.empty();
+    this.render();
+  }
+
   async ensureVaultState() {
-    if (this.plugin.vaultExists !== null || this.detecting) return;
+    if (this.plugin.vaultState !== 'unknown' || this.detecting) return;
     this.detecting = true;
     try {
       await this.plugin.detectVaultExists();
@@ -483,7 +557,10 @@ class SecretVaultView extends ItemView {
     if (!this.contentEl) return;
     const el = this.contentEl;
     el.empty();
-    if (!this.plugin.isUnlocked()) this.revealed.clear();
+    if (!this.plugin.isUnlocked()) {
+      this.revealed.clear();
+      this.masked = false;
+    }
 
     const root = el.createDiv({ cls: 'xsv-view' });
     if (!this.plugin.cryptoApi) {
@@ -493,19 +570,81 @@ class SecretVaultView extends ItemView {
     }
 
     if (this.plugin.isUnlocked()) {
+      if (this.masked) {
+        this.renderMask(root);
+        return;
+      }
       this.renderUnlocked(root);
       return;
     }
 
-    if (this.plugin.vaultExists === null) {
+    const state = this.plugin.vaultState;
+    if (state === 'unknown') {
       root.createDiv({ cls: 'xsv-title', text: this.plugin.t('view_title') });
       root.createDiv({ cls: 'xsv-desc', text: this.plugin.t('status_loading') });
       void this.ensureVaultState();
       return;
     }
 
-    if (this.plugin.vaultExists) this.renderUnlock(root);
-    else this.renderSetup(root);
+    if (state === 'present') {
+      this.renderUnlock(root);
+      return;
+    }
+
+    if (state === 'error') {
+      this.renderStateError(root, this.plugin.t('err_vault_unreadable'));
+      return;
+    }
+
+    // 曾经初始化过的路径现在文件缺失：显示错误态，绝不引导用户重新创建（否则会覆盖同名旧库）
+    if (state === 'absent' && this.plugin.settings.initializedPath === this.plugin.getVaultPath()) {
+      this.renderStateError(root, this.plugin.t('err_vault_missing'));
+      return;
+    }
+
+    this.renderSetup(root);
+  }
+
+  renderStateError(root, message) {
+    this.renderHeader(root, this.plugin.t('subtitle_locked'));
+    root.createDiv({ cls: 'xsv-error', text: message });
+    const actions = root.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    const retryButton = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_retry') });
+    retryButton.addEventListener('click', () => {
+      this.plugin.vaultState = 'unknown';
+      void this.ensureVaultState();
+    });
+  }
+
+  // 失焦遮罩：只保留验证入口，DOM 中不渲染任何条目内容
+  renderMask(root) {
+    const mask = root.createDiv({ cls: 'xsv-mask' });
+    const card = mask.createDiv({ cls: 'xsv-mask-card' });
+    card.createDiv({ cls: 'xsv-title', text: this.plugin.t('mask_title') });
+    card.createDiv({ cls: 'xsv-desc', text: this.plugin.t('mask_desc') });
+    const password = this.createPasswordField(card, this.plugin.t('label_password'), () => submit());
+    const errorEl = card.createDiv({ cls: 'xsv-error' });
+    errorEl.setText('');
+    const actions = card.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    const verifyButton = actions.createEl('button', {
+      cls: 'xsv-btn xsv-btn-primary',
+      text: this.plugin.t('btn_reverify'),
+    });
+
+    const submit = async () => {
+      errorEl.setText('');
+      const ok = await this.plugin.reverify(password.value);
+      if (!ok) {
+        errorEl.setText(this.plugin.t('notice_reverify_failed'));
+        password.value = '';
+        return;
+      }
+      this.masked = false;
+      this.render();
+    };
+
+    verifyButton.addEventListener('click', () => void submit());
+    if (typeof password.focus === 'function') password.focus();
   }
 
   renderHeader(root, subtitle) {
@@ -540,7 +679,7 @@ class SecretVaultView extends ItemView {
       this.uiError = '';
       try {
         await this.plugin.createVault(value);
-        this.plugin.vaultExists = true;
+        this.plugin.vaultState = 'present';
         new Notice(this.plugin.t('notice_vault_created'), 3000);
         this.render();
       } catch (error) {
@@ -573,15 +712,15 @@ class SecretVaultView extends ItemView {
       try {
         const ok = await this.plugin.unlock(value);
         if (!ok) {
-          this.uiError = this.plugin.t('err_unlock_failed');
+          this.uiError = this.plugin.lastUnlockError || this.plugin.t('err_unlock_failed');
           this.render();
           return;
         }
-        this.plugin.vaultExists = true;
+        this.plugin.vaultState = 'present';
         this.render();
       } catch (error) {
         console.error('[' + PLUGIN_ID + '] unlock failed:', error);
-        this.uiError = this.plugin.t('err_generic', { msg: errorMessage(error) });
+        this.uiError = this.plugin.t('err_unlock_failed');
         this.render();
       }
     };
@@ -696,12 +835,17 @@ class SecretEntryModal extends Modal {
     super(app);
     this.plugin = plugin;
     this.entry = entry || null;
+    this.draftContent = entry ? entry.content : '';
+    this.contentRevealed = !entry;
   }
 
   onOpen() {
     this.plugin.trackModal(this);
     this.plugin.touchActivity();
-    this.titleEl.setText(this.plugin.t(this.entry ? 'title_edit_entry' : 'title_new_entry'));
+    const plugin = this.plugin;
+    const entry = this.entry;
+    const t = (key, vars) => plugin.t(key, vars);
+    this.titleEl.setText(t(entry ? 'title_edit_entry' : 'title_new_entry'));
 
     const form = this.contentEl.createDiv({ cls: 'xsv-modal' });
     const field = (label) => {
@@ -709,85 +853,143 @@ class SecretEntryModal extends Modal {
       wrap.createDiv({ cls: 'xsv-label', text: label });
       return wrap;
     };
+    const bindActivity = (el) => {
+      el.addEventListener('input', () => plugin.touchActivity());
+      el.addEventListener('keydown', () => plugin.touchActivity());
+      el.addEventListener('change', () => plugin.touchActivity());
+    };
+    const harden = (el) => {
+      el.autocomplete = 'off';
+      el.spellcheck = false;
+      el.setAttribute('autocomplete', 'off');
+      el.setAttribute('spellcheck', 'false');
+      el.addEventListener('dragstart', (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      });
+    };
 
-    const nameWrap = field(this.plugin.t('field_name'));
+    const nameWrap = field(t('field_name'));
     const nameInput = nameWrap.createEl('input', { type: 'text', cls: 'xsv-input' });
-    nameInput.value = this.entry ? this.entry.name : '';
+    nameInput.value = entry ? entry.name : '';
+    harden(nameInput);
+    bindActivity(nameInput);
 
-    const typeWrap = field(this.plugin.t('field_type'));
+    const typeWrap = field(t('field_type'));
     const typeSelect = typeWrap.createEl('select', { cls: 'xsv-input' });
     for (const type of ENTRY_TYPES) {
-      const option = typeSelect.createEl('option', { text: this.plugin.typeLabel(type) });
+      const option = typeSelect.createEl('option', { text: plugin.typeLabel(type) });
       option.value = type;
     }
-    typeSelect.value = this.entry ? this.entry.type : 'password';
+    typeSelect.value = entry ? entry.type : 'password';
+    bindActivity(typeSelect);
 
-    const tagsWrap = field(this.plugin.t('field_tags'));
+    const tagsWrap = field(t('field_tags'));
     const tagsInput = tagsWrap.createEl('input', { type: 'text', cls: 'xsv-input' });
-    tagsInput.value = this.entry ? this.entry.tags.join(', ') : '';
-    tagsInput.setAttribute('placeholder', this.plugin.t('tags_placeholder'));
+    tagsInput.value = entry ? entry.tags.join(', ') : '';
+    tagsInput.setAttribute('placeholder', t('tags_placeholder'));
+    harden(tagsInput);
+    bindActivity(tagsInput);
 
-    const contentWrap = field(this.plugin.t('field_content'));
-    const contentInput = contentWrap.createEl('textarea', { cls: 'xsv-input xsv-textarea' });
-    contentInput.rows = 6;
-    contentInput.value = this.entry ? this.entry.content : '';
+    // 内容默认掩码，必须点「显示」才呈现；关闭弹窗即复位
+    const contentWrap = field(t('field_content'));
+    let contentInput = null;
+    const renderContentArea = () => {
+      contentWrap.empty();
+      if (this.contentRevealed) {
+        contentInput = contentWrap.createEl('textarea', { cls: 'xsv-input xsv-textarea' });
+        contentInput.rows = 6;
+        contentInput.value = this.draftContent;
+        contentInput.spellcheck = false;
+        contentInput.setAttribute('autocomplete', 'off');
+        contentInput.setAttribute('spellcheck', 'false');
+        contentInput.addEventListener('dragstart', (event) => {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        });
+        bindActivity(contentInput);
+        return;
+      }
+      contentInput = null;
+      contentWrap.createDiv({ cls: 'xsv-masked', text: '••••••••' });
+      const showButton = contentWrap.createEl('button', {
+        cls: 'xsv-btn xsv-btn-small',
+        text: t('btn_reveal'),
+      });
+      showButton.addEventListener('click', () => {
+        this.contentRevealed = true;
+        plugin.touchActivity();
+        renderContentArea();
+      });
+    };
+    renderContentArea();
 
-    const noteWrap = field(this.plugin.t('field_note'));
+    const noteWrap = field(t('field_note'));
     const noteInput = noteWrap.createEl('textarea', { cls: 'xsv-input xsv-textarea' });
     noteInput.rows = 2;
-    noteInput.value = this.entry ? this.entry.note : '';
+    noteInput.value = entry ? entry.note : '';
+    harden(noteInput);
+    bindActivity(noteInput);
 
     const errorEl = form.createDiv({ cls: 'xsv-error' });
     errorEl.setText('');
 
     const actions = form.createDiv({ cls: 'xsv-actions' });
-    const cancelButton = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_cancel') });
+    const cancelButton = actions.createEl('button', { cls: 'xsv-btn', text: t('btn_cancel') });
     cancelButton.addEventListener('click', () => this.close());
     const saveButton = actions.createEl('button', {
       cls: 'xsv-btn xsv-btn-primary',
-      text: this.plugin.t('btn_save'),
+      text: t('btn_save'),
     });
 
     const submit = async () => {
       const name = nameInput.value.trim();
       if (!name) {
-        errorEl.setText(this.plugin.t('notice_name_required'));
+        errorEl.setText(t('notice_name_required'));
         return;
       }
       const payload = {
         name,
         type: typeSelect.value,
         tags: sanitizeTags(tagsInput.value),
-        content: contentInput.value,
+        content: this.contentRevealed && contentInput ? contentInput.value : this.draftContent,
         note: noteInput.value,
       };
       errorEl.setText('');
       saveButton.disabled = true;
       try {
-        if (this.entry) {
-          const changed = await this.plugin.updateEntry(this.entry.id, payload);
-          new Notice(this.plugin.t(changed ? 'notice_saved' : 'notice_unchanged'), 3000);
+        if (entry) {
+          const result = await plugin.updateEntry(entry.id, payload);
+          if (result === false) {
+            // 锁定 / 外部冲突 / 写盘失败：不得再提示“已保存”
+            errorEl.setText(t('err_save_discarded'));
+            return;
+          }
+          new Notice(t(result === 'unchanged' ? 'notice_unchanged' : 'notice_saved'), 3000);
         } else {
-          await this.plugin.addEntry(payload);
-          new Notice(this.plugin.t('notice_saved'), 3000);
+          const created = await plugin.addEntry(payload);
+          if (!created) {
+            errorEl.setText(t('err_save_discarded'));
+            return;
+          }
+          new Notice(t('notice_saved'), 3000);
         }
         this.close();
-        this.plugin.refreshViews();
       } catch (error) {
         console.error('[' + PLUGIN_ID + '] save entry failed:', error);
-        errorEl.setText(this.plugin.t('err_generic', { msg: errorMessage(error) }));
+        errorEl.setText(t('err_generic', { msg: errorMessage(error) }));
       } finally {
         saveButton.disabled = false;
       }
     };
 
     saveButton.addEventListener('click', () => void submit());
-    if (!this.entry && typeof nameInput.focus === 'function') nameInput.focus();
+    if (!entry && typeof nameInput.focus === 'function') nameInput.focus();
   }
 
   onClose() {
     this.plugin.untrackModal(this);
     this.contentEl.empty();
+    this.draftContent = '';
+    this.contentRevealed = false;
   }
 }
 
@@ -819,7 +1021,12 @@ class SecretDeleteModal extends Modal {
     deleteButton.addEventListener('click', async () => {
       deleteButton.disabled = true;
       try {
-        await this.plugin.deleteEntry(this.entry.id);
+        const deleted = await this.plugin.deleteEntry(this.entry.id);
+        if (!deleted) {
+          new Notice(this.plugin.t('err_save_discarded'), 6000);
+          deleteButton.disabled = false;
+          return;
+        }
         new Notice(this.plugin.t('notice_deleted'), 3000);
         this.close();
         this.plugin.refreshViews();
@@ -847,13 +1054,20 @@ class XUSecretVault extends Plugin {
   sessionSalt = null;
   sessionIterations = KDF_ITERATIONS;
   entries = [];
-  vaultExists = null;
+  vaultState = 'unknown';
   idleDeadline = 0;
   clipboardTimer = 0;
   clipboardText = null;
   openModals = new Set();
   writeChain = Promise.resolve();
   sessionGeneration = 0;
+  knownBlobHash = null;
+  passwordVerifier = null;
+  failureCount = 0;
+  blockedUntil = 0;
+  hiddenAt = 0;
+  suspended = false;
+  lastUnlockError = '';
 
   t(key, vars) {
     const lang = this.settings && this.settings.language === 'en' ? 'en' : 'zh';
@@ -909,6 +1123,14 @@ class XUSecretVault extends Plugin {
 
     this.registerInterval(globalThis.setInterval(() => this.checkAutoLock(), 15000));
 
+    // 切后台 / 失焦：立即遮罩并清屏；hidden 超过 60 秒直接锁定
+    if (typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') {
+      this.registerDomEvent(document, 'visibilitychange', () => this.handleVisibilityChange());
+    }
+    if (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function') {
+      this.registerDomEvent(window, 'blur', () => this.handleWindowBlur());
+    }
+
     this.app.workspace.onLayoutReady(() => {
       if (!this.cryptoApi) new Notice(this.t('err_crypto_unavailable'), 10000);
     });
@@ -957,12 +1179,14 @@ class XUSecretVault extends Plugin {
 
   async detectVaultExists() {
     try {
-      this.vaultExists = await this.app.vault.adapter.exists(this.getVaultPath());
+      this.vaultState = (await this.app.vault.adapter.exists(this.getVaultPath())) ? 'present' : 'absent';
     } catch (error) {
       console.error('[' + PLUGIN_ID + '] detect vault failed:', error);
-      this.vaultExists = false;
+      // 读取异常不能当成"文件不存在"，否则会引导用户创建并覆盖同名旧库
+      this.vaultState = 'error';
     }
-    return this.vaultExists;
+    this.refreshViews();
+    return this.vaultState;
   }
 
   /* ---------------- 加密原语 ---------------- */
@@ -971,7 +1195,7 @@ class XUSecretVault extends Plugin {
     const cryptoObj = this.requireCrypto();
     const material = await cryptoObj.subtle.importKey(
       'raw',
-      utf8Encode(password),
+      utf8Encode(normalizePassword(password)),
       { name: 'PBKDF2' },
       false,
       ['deriveKey']
@@ -985,16 +1209,28 @@ class XUSecretVault extends Plugin {
     );
   }
 
+  async hashText(text) {
+    const cryptoObj = this.requireCrypto();
+    const digest = await cryptoObj.subtle.digest('SHA-256', utf8Encode(text));
+    return bytesToBase64(digest);
+  }
+
   async encryptToEnvelope(entries, key, salt, iterations) {
     const cryptoObj = this.requireCrypto();
     const iv = randomBytes(cryptoObj, IV_BYTES);
     const saltBase64 = bytesToBase64(salt);
-    const plaintext = JSON.stringify({ version: FORMAT_VERSION, entries });
+    // updatedAt 放进加密载荷，不在信封头上明文暴露
+    const plaintext = JSON.stringify({
+      version: FORMAT_VERSION,
+      updatedAt: new Date().toISOString(),
+      entries,
+    });
     const ciphertext = await cryptoObj.subtle.encrypt(
       {
         name: 'AES-GCM',
         iv,
-        additionalData: buildAad(FORMAT_VERSION, KDF_ALGO, iterations, saltBase64),
+        additionalData: buildAad(FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO),
+        tagLength: TAG_LENGTH,
       },
       key,
       utf8Encode(plaintext)
@@ -1007,12 +1243,73 @@ class XUSecretVault extends Plugin {
         salt: saltBase64,
       },
       cipher: {
-        algo: 'AES-256-GCM',
+        algo: CIPHER_ALGO,
         iv: bytesToBase64(iv),
       },
-      updatedAt: new Date().toISOString(),
       payload: bytesToBase64(ciphertext),
     };
+  }
+
+  validateEnvelope(envelope) {
+    if (!envelope || typeof envelope !== 'object') throw new Error('invalid envelope');
+    if (Number(envelope.formatVersion) !== FORMAT_VERSION) throw new Error('invalid formatVersion');
+    if (!envelope.kdf || typeof envelope.kdf !== 'object') throw new Error('invalid kdf');
+    if (envelope.kdf.algo !== KDF_ALGO) throw new Error('invalid kdf algo');
+    if (Number(envelope.kdf.iterations) !== KDF_ITERATIONS) throw new Error('invalid kdf iterations');
+    if (typeof envelope.kdf.salt !== 'string') throw new Error('invalid salt');
+    if (base64ToBytes(envelope.kdf.salt).length !== SALT_BYTES) throw new Error('invalid salt length');
+    if (!envelope.cipher || typeof envelope.cipher !== 'object') throw new Error('invalid cipher');
+    // cipher.algo 参与 AAD，这里也断言只能是 AES-256-GCM
+    if (envelope.cipher.algo !== CIPHER_ALGO) throw new Error('invalid cipher algo');
+    if (typeof envelope.cipher.iv !== 'string') throw new Error('invalid iv');
+    if (base64ToBytes(envelope.cipher.iv).length !== IV_BYTES) throw new Error('invalid iv length');
+    if (typeof envelope.payload !== 'string' || !envelope.payload) throw new Error('invalid payload');
+    return envelope;
+  }
+
+  parseEnvelope(text) {
+    return this.validateEnvelope(JSON.parse(text));
+  }
+
+  async decryptEnvelope(envelope, key) {
+    const cryptoObj = this.requireCrypto();
+    const iterations = Number(envelope.kdf.iterations);
+    const saltBase64 = String(envelope.kdf.salt);
+    const plaintext = await cryptoObj.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: base64ToBytes(envelope.cipher.iv),
+        additionalData: buildAad(
+          envelope.formatVersion,
+          envelope.kdf.algo,
+          iterations,
+          saltBase64,
+          envelope.cipher.algo
+        ),
+        tagLength: TAG_LENGTH,
+      },
+      key,
+      base64ToBytes(envelope.payload)
+    );
+    return JSON.parse(utf8Decode(plaintext));
+  }
+
+  async readVaultText(path) {
+    const adapter = this.app.vault.adapter;
+    let size = null;
+    if (typeof adapter.stat === 'function') {
+      try {
+        const stat = await adapter.stat(path);
+        if (stat && typeof stat.size === 'number') size = stat.size;
+      } catch (error) {
+        size = null;
+      }
+    }
+    // 8 MB 上限：避免超大文件把解密/整体加密拖死
+    if (size !== null && size > MAX_VAULT_BYTES) throw new Error(this.t('err_vault_too_large'));
+    const text = await adapter.read(path);
+    if (utf8Encode(text).length > MAX_VAULT_BYTES) throw new Error(this.t('err_vault_too_large'));
+    return text;
   }
 
   async ensureParentDir(path) {
@@ -1028,135 +1325,241 @@ class XUSecretVault extends Plugin {
     }
   }
 
-  async writeEnvelope(entries, key, salt, iterations, targetPath) {
-    const envelope = await this.encryptToEnvelope(entries, key, salt, iterations);
-    const text = JSON.stringify(envelope, null, 2);
-    const path = targetPath || this.getVaultPath();
-    await this.ensureParentDir(path);
-    await this.app.vault.adapter.write(path, text);
-
-    // 写盘后立即读回校验（本机存在外部进程干扰写盘的历史坑）
-    const readBack = await this.app.vault.adapter.read(path);
-    if (readBack !== text) throw new Error(this.t('err_write_verify'));
-    try {
-      const parsed = JSON.parse(readBack);
-      if (!parsed || parsed.formatVersion !== FORMAT_VERSION || typeof parsed.payload !== 'string') {
-        throw new Error('invalid envelope');
-      }
-    } catch (error) {
-      throw new Error(this.t('err_write_verify'));
-    }
-    return envelope;
+  // 解密刚生成的密文并与预期条目逐字段比对（D-01：不能只比对字符串）
+  async verifyEnvelopeText(text, key, expectedEntries) {
+    const envelope = this.parseEnvelope(text);
+    const data = await this.decryptEnvelope(envelope, key);
+    if (!data || !Array.isArray(data.entries)) throw new Error(this.t('err_write_verify'));
+    if (!sameJson(data.entries, expectedEntries)) throw new Error(this.t('err_write_verify'));
   }
 
-  async saveEntries(nextEntries) {
-    if (!this.sessionKey || !this.sessionSalt) throw new Error(this.t('notice_unlock_first'));
-    // 捕获当前会话上下文：锁定/重新解锁后，排队中的写盘不得污染新会话
+  // 原子写：先写 .tmp（内容仍是密文）→ 读回解密校验 → rename 覆盖；任一步失败都删 tmp，旧 blob 不动
+  async writeEnvelope(entries, key, salt, iterations, targetPath, trackHash) {
+    const envelope = await this.encryptToEnvelope(entries, key, salt, iterations);
+    const text = JSON.stringify(envelope, null, 2);
+    if (utf8Encode(text).length > MAX_VAULT_BYTES) throw new Error(this.t('err_vault_too_large'));
+    await this.verifyEnvelopeText(text, key, entries);
+
+    const path = targetPath || this.getVaultPath();
+    const tmpPath = path + '.tmp';
+    await this.ensureParentDir(path);
+    try {
+      await this.app.vault.adapter.write(tmpPath, text);
+      const readBack = await this.app.vault.adapter.read(tmpPath);
+      if (readBack !== text) throw new Error(this.t('err_write_verify'));
+      await this.verifyEnvelopeText(readBack, key, entries);
+      await this.app.vault.adapter.rename(tmpPath, path);
+      const finalText = await this.app.vault.adapter.read(path);
+      if (finalText !== text) throw new Error(this.t('err_write_verify'));
+      await this.verifyEnvelopeText(finalText, key, entries);
+      if (trackHash !== false) this.knownBlobHash = await this.hashText(finalText);
+    } catch (error) {
+      // 不论 write 是否已成功返回，都尝试清掉 .tmp（写入中途抛错时可能已落下半截）
+      try {
+        if (typeof this.app.vault.adapter.remove === 'function') {
+          await this.app.vault.adapter.remove(tmpPath);
+        }
+      } catch (cleanupError) {
+        /* 文件不存在时无需处理 */
+      }
+      throw error;
+    }
+    return text;
+  }
+
+  // 写前哈希比对：文件被外部改过（或凭空出现/消失）就拒绝覆盖
+  async detectExternalChange(path) {
+    let exists = false;
+    try {
+      exists = await this.app.vault.adapter.exists(path);
+    } catch (error) {
+      return true;
+    }
+    if (!exists) return this.knownBlobHash !== null;
+    if (!this.knownBlobHash) return true;
+    try {
+      const text = await this.readVaultText(path);
+      return (await this.hashText(text)) !== this.knownBlobHash;
+    } catch (error) {
+      return true;
+    }
+  }
+
+  async buildConflictPath(path) {
+    const base = path.replace(/\.enc$/i, '');
+    const stamp = fileStamp(new Date());
+    let candidate = base + '.conflict-' + stamp + '.enc';
+    let counter = 2;
+    // 极端情况下同一秒多次冲突：追加序号避免覆盖
+    while (await this.app.vault.adapter.exists(candidate)) {
+      candidate = base + '.conflict-' + stamp + '-' + counter + '.enc';
+      counter += 1;
+    }
+    return candidate;
+  }
+
+  // 串行化：读现有 → 合并 → 加密 → 写盘全部在 writeChain 内执行，入队前不计算 next
+  async commitEntries(mutator) {
+    if (!this.isUnlocked()) throw new Error(this.t('notice_unlock_first'));
     const generation = this.sessionGeneration;
     const key = this.sessionKey;
     const salt = this.sessionSalt;
     const iterations = this.sessionIterations;
-    const targetPath = this.getVaultPath();
-    const task = this.writeChain.then(
-      () => this.writeEnvelope(nextEntries, key, salt, iterations, targetPath),
-      () => this.writeEnvelope(nextEntries, key, salt, iterations, targetPath)
-    );
+    const path = this.getVaultPath();
+    const job = () => this.runWriteJob(mutator, generation, key, salt, iterations, path);
+    const task = this.writeChain.then(job, job);
     this.writeChain = task.then(
       () => undefined,
       () => undefined
     );
-    await task;
-    if (generation !== this.sessionGeneration) return false;
-    this.entries = nextEntries;
-    return true;
+    const result = await task;
+    if (result && result.written) this.refreshViews();
+    return result;
+  }
+
+  async runWriteJob(mutator, generation, key, salt, iterations, path) {
+    // 锁定后的待写任务直接丢弃，绝不把明文重新落盘
+    if (generation !== this.sessionGeneration || !this.sessionKey) {
+      return { written: false, discarded: true, unchanged: false, conflict: false };
+    }
+    const outcome = mutator(this.entries) || {};
+    if (!outcome.entries) {
+      return { written: false, discarded: false, unchanged: true, conflict: false };
+    }
+    const next = outcome.entries;
+    if (await this.detectExternalChange(path)) {
+      const conflictPath = await this.buildConflictPath(path);
+      await this.writeEnvelope(next, key, salt, iterations, conflictPath, false);
+      new Notice(this.t('notice_conflict', { path: conflictPath }), 10000);
+      return { written: false, discarded: false, unchanged: false, conflict: true, conflictPath };
+    }
+    await this.writeEnvelope(next, key, salt, iterations, path, true);
+    if (generation !== this.sessionGeneration) {
+      return { written: false, discarded: true, unchanged: false, conflict: false };
+    }
+    this.entries = next;
+    return { written: true, discarded: false, unchanged: false, conflict: false };
   }
 
   /* ---------------- 保险库生命周期 ---------------- */
 
   async createVault(password) {
     const cryptoObj = this.requireCrypto();
+    const normalized = normalizePassword(password);
     const salt = randomBytes(cryptoObj, SALT_BYTES);
-    const key = await this.deriveKey(password, salt, KDF_ITERATIONS);
-    await this.writeEnvelope([], key, salt, KDF_ITERATIONS);
+    const key = await this.deriveKey(normalized, salt, KDF_ITERATIONS);
+    const path = this.getVaultPath();
+    // 已存在同名文件时拒绝创建，避免覆盖旧库
+    if (await this.app.vault.adapter.exists(path)) throw new Error(this.t('err_vault_exists'));
+    await this.writeEnvelope([], key, salt, KDF_ITERATIONS, path, true);
     this.sessionGeneration += 1;
     this.sessionKey = key;
     this.sessionSalt = salt;
     this.sessionIterations = KDF_ITERATIONS;
     this.entries = [];
-    this.vaultExists = true;
+    this.vaultState = 'present';
+    this.passwordVerifier = await this.hashText(normalized);
+    this.failureCount = 0;
+    this.blockedUntil = 0;
+    this.settings.initializedPath = path;
     this.resetIdleTimer();
     this.refreshViews();
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      console.error('[' + PLUGIN_ID + '] save settings failed:', error);
+    }
     return true;
   }
 
+  getUnlockWaitSeconds() {
+    const left = this.blockedUntil - Date.now();
+    return left > 0 ? Math.ceil(left / 1000) : 0;
+  }
+
+  registerUnlockFailure() {
+    this.failureCount += 1;
+    const backoff = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * Math.pow(2, this.failureCount - 1));
+    this.blockedUntil = Date.now() + backoff;
+  }
+
+  // 统一失败口径：文件缺失/JSON 畸形/base64 损坏/版本不符/密码错误都 return false，不抛原始异常
   async unlock(password) {
-    const cryptoObj = this.requireCrypto();
-    const path = this.getVaultPath();
-    const exists = await this.app.vault.adapter.exists(path);
-    if (!exists) {
-      this.vaultExists = false;
+    this.lastUnlockError = '';
+    const wait = this.getUnlockWaitSeconds();
+    if (wait > 0) {
+      this.lastUnlockError = this.t('err_unlock_backoff', { seconds: wait });
+      return false;
+    }
+    try {
+      const path = this.getVaultPath();
+      const exists = await this.app.vault.adapter.exists(path);
+      if (!exists) {
+        this.vaultState = 'absent';
+        this.lastUnlockError = this.t('err_vault_missing');
+        this.refreshViews();
+        return false;
+      }
+      const text = await this.readVaultText(path);
+      const envelope = this.parseEnvelope(text);
+      const iterations = Number(envelope.kdf.iterations);
+      const salt = base64ToBytes(envelope.kdf.salt);
+      const key = await this.deriveKey(password, salt, iterations);
+      let data;
+      try {
+        data = await this.decryptEnvelope(envelope, key);
+      } catch (error) {
+        this.registerUnlockFailure();
+        this.lastUnlockError = this.t('err_unlock_failed');
+        return false;
+      }
+      if (!data || !Array.isArray(data.entries)) throw new Error('invalid payload');
+      const entries = data.entries.map((item, index) => normalizeStoredEntry(item, 'restored-' + index));
+      this.failureCount = 0;
+      this.blockedUntil = 0;
+      this.sessionGeneration += 1;
+      this.sessionKey = key;
+      this.sessionSalt = salt;
+      this.sessionIterations = iterations;
+      this.entries = entries;
+      this.vaultState = 'present';
+      this.knownBlobHash = await this.hashText(text);
+      this.passwordVerifier = await this.hashText(normalizePassword(password));
+      this.settings.initializedPath = path;
+      this.resetIdleTimer();
       this.refreshViews();
+      try {
+        await this.saveSettings();
+      } catch (error) {
+        console.error('[' + PLUGIN_ID + '] save settings failed:', error);
+      }
+      return true;
+    } catch (error) {
+      console.error('[' + PLUGIN_ID + '] unlock failed:', error);
+      this.registerUnlockFailure();
+      this.lastUnlockError =
+        errorMessage(error) === this.t('err_vault_too_large')
+          ? this.t('err_vault_too_large')
+          : this.t('err_unlock_failed');
       return false;
     }
+  }
 
-    const text = await this.app.vault.adapter.read(path);
-    let envelope;
+  // 回到前台后的重新验证：内存中只保留口令的 SHA-256 校验值，不落盘
+  async reverify(password) {
+    if (!this.isUnlocked() || !this.passwordVerifier) return false;
     try {
-      envelope = JSON.parse(text);
+      const digest = await this.hashText(normalizePassword(password));
+      if (digest !== this.passwordVerifier) return false;
+      this.hiddenAt = 0;
+      this.suspended = false;
+      this.resetIdleTimer();
+      this.refreshViews();
+      return true;
     } catch (error) {
-      throw new Error(this.t('err_vault_corrupt'));
-    }
-    if (
-      !envelope ||
-      envelope.formatVersion !== FORMAT_VERSION ||
-      !envelope.kdf ||
-      !envelope.cipher ||
-      typeof envelope.payload !== 'string'
-    ) {
-      throw new Error(this.t('err_vault_corrupt'));
-    }
-    if (envelope.kdf.algo !== KDF_ALGO || Number(envelope.kdf.iterations) !== KDF_ITERATIONS) {
-      // 拒绝任何 KDF 算法或迭代数偏离当前标准的信封，避免降级攻击
-      throw new Error(this.t('err_vault_corrupt'));
-    }
-
-    const iterations = Number(envelope.kdf.iterations);
-    const salt = base64ToBytes(envelope.kdf.salt);
-    const saltBase64 = String(envelope.kdf.salt);
-    const key = await this.deriveKey(password, salt, iterations);
-    let plaintext;
-    try {
-      plaintext = await cryptoObj.subtle.decrypt(
-        {
-          name: 'AES-GCM',
-          iv: base64ToBytes(envelope.cipher.iv),
-          additionalData: buildAad(envelope.formatVersion, envelope.kdf.algo, iterations, saltBase64),
-        },
-        key,
-        base64ToBytes(envelope.payload)
-      );
-    } catch (error) {
+      console.error('[' + PLUGIN_ID + '] reverify failed:', error);
       return false;
     }
-
-    let data;
-    try {
-      data = JSON.parse(utf8Decode(plaintext));
-    } catch (error) {
-      throw new Error(this.t('err_vault_corrupt'));
-    }
-    if (!data || !Array.isArray(data.entries)) throw new Error(this.t('err_vault_corrupt'));
-
-    const entries = data.entries.map((item, index) => normalizeStoredEntry(item, 'restored-' + index));
-    this.sessionGeneration += 1;
-    this.sessionKey = key;
-    this.sessionSalt = salt;
-    this.sessionIterations = iterations;
-    this.entries = entries;
-    this.vaultExists = true;
-    this.resetIdleTimer();
-    this.refreshViews();
-    return true;
   }
 
   lock() {
@@ -1167,6 +1570,11 @@ class XUSecretVault extends Plugin {
     this.sessionIterations = KDF_ITERATIONS;
     this.entries = [];
     this.idleDeadline = 0;
+    this.knownBlobHash = null;
+    this.passwordVerifier = null;
+    this.hiddenAt = 0;
+    this.suspended = false;
+    this.lastUnlockError = '';
 
     for (const modal of Array.from(this.openModals)) {
       try {
@@ -1217,39 +1625,43 @@ class XUSecretVault extends Plugin {
       },
       base
     );
-    const next = this.entries.concat([entry]);
-    await this.saveEntries(next);
-    this.refreshViews();
+    const result = await this.commitEntries((current) => ({ entries: current.concat([entry]) }));
+    if (!result.written) return false;
     return entry;
   }
 
   async updateEntry(id, input) {
     this.assertUnlocked();
-    const index = this.entries.findIndex((entry) => entry.id === id);
-    if (index < 0) throw new Error(this.t('err_vault_corrupt'));
-    const previous = this.entries[index];
     const base = normalizeEntryInput(input);
-    const unchanged =
-      previous.name === base.name &&
-      previous.type === base.type &&
-      previous.content === base.content &&
-      previous.note === base.note &&
-      JSON.stringify(previous.tags) === JSON.stringify(base.tags);
-    if (unchanged) return false;
-
-    const next = this.entries.slice();
-    next[index] = Object.assign({}, previous, base, { updatedAt: new Date().toISOString() });
-    await this.saveEntries(next);
-    this.refreshViews();
+    // 查找与比对都放进串行队列，避免并发保存拿到过期快照后互相覆盖
+    const result = await this.commitEntries((current) => {
+      const index = current.findIndex((entry) => entry.id === id);
+      if (index < 0) throw new Error(this.t('err_vault_corrupt'));
+      const previous = current[index];
+      const unchanged =
+        previous.name === base.name &&
+        previous.type === base.type &&
+        previous.content === base.content &&
+        previous.note === base.note &&
+        JSON.stringify(previous.tags) === JSON.stringify(base.tags);
+      if (unchanged) return { entries: null };
+      const next = current.slice();
+      next[index] = Object.assign({}, previous, base, { updatedAt: new Date().toISOString() });
+      return { entries: next };
+    });
+    if (result.unchanged) return 'unchanged';
+    if (!result.written) return false;
     return true;
   }
 
   async deleteEntry(id) {
     this.assertUnlocked();
-    const next = this.entries.filter((entry) => entry.id !== id);
-    if (next.length === this.entries.length) return false;
-    await this.saveEntries(next);
-    this.refreshViews();
+    const result = await this.commitEntries((current) => {
+      const next = current.filter((entry) => entry.id !== id);
+      if (next.length === current.length) return { entries: null };
+      return { entries: next };
+    });
+    if (result.unchanged || !result.written) return false;
     return true;
   }
 
@@ -1271,6 +1683,7 @@ class XUSecretVault extends Plugin {
   async copySecret(text) {
     if (!text) return;
     this.touchActivity();
+    if (!this.isUnlocked()) return;
     if (
       typeof navigator === 'undefined' ||
       !navigator.clipboard ||
@@ -1280,6 +1693,15 @@ class XUSecretVault extends Plugin {
       return;
     }
     await navigator.clipboard.writeText(text);
+    // 写剪贴板期间若已锁定，立即清空，不再把明文写回内存或起定时器
+    if (!this.isUnlocked()) {
+      try {
+        await navigator.clipboard.writeText('');
+      } catch (error) {
+        console.error('[' + PLUGIN_ID + '] clipboard cleanup failed:', error);
+      }
+      return;
+    }
     this.clipboardText = text;
     this.clearClipboardTimer();
     const seconds = Math.max(5, Number(this.settings.clipboardClearSeconds) || 30);
@@ -1294,19 +1716,34 @@ class XUSecretVault extends Plugin {
     this.clipboardText = null;
     this.clearClipboardTimer();
     if (!owned) return;
-    try {
-      if (
-        typeof navigator !== 'undefined' &&
-        navigator.clipboard &&
-        typeof navigator.clipboard.readText === 'function'
-      ) {
-        const current = await navigator.clipboard.readText();
-        if (current !== owned) return;
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.clipboard ||
+      typeof navigator.clipboard.writeText !== 'function'
+    ) {
+      return;
+    }
+    let current = null;
+    let readFailed = true;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        current = await navigator.clipboard.readText();
+        readFailed = false;
+        break;
+      } catch (error) {
+        readFailed = true;
+        await delay(60);
       }
+    }
+    // 读不到剪贴板时不能静默保留明文：重试一次后无条件清空并提示
+    if (!readFailed && current !== owned) return;
+    try {
       await navigator.clipboard.writeText('');
-      if (notify) new Notice(this.t('notice_clipboard_cleared'), 3000);
+      if (readFailed) new Notice(this.t('notice_clipboard_forced'), 6000);
+      else if (notify) new Notice(this.t('notice_clipboard_cleared'), 3000);
     } catch (error) {
       console.error('[' + PLUGIN_ID + '] clipboard clear failed:', error);
+      if (readFailed) new Notice(this.t('notice_clipboard_forced'), 6000);
     }
   }
 
@@ -1322,7 +1759,7 @@ class XUSecretVault extends Plugin {
       this.idleDeadline = 0;
       return;
     }
-    const minutes = Math.max(1, Number(this.settings.autoLockMinutes) || 5);
+    const minutes = Math.max(1, Number(this.settings.autoLockMinutes) || 15);
     this.idleDeadline = Date.now() + minutes * 60000;
   }
 
@@ -1330,8 +1767,60 @@ class XUSecretVault extends Plugin {
     if (this.isUnlocked()) this.resetIdleTimer();
   }
 
+  // 后台超过阈值：直接锁定并清屏
+  lockFromBackground() {
+    if (!this.isUnlocked()) return;
+    this.lock();
+    new Notice(this.t('notice_background_locked'), 6000);
+  }
+
+  maskAllViews() {
+    try {
+      const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+      for (const leaf of leaves) {
+        const view = leaf && leaf.view;
+        if (view && typeof view.maskSensitive === 'function') view.maskSensitive();
+      }
+    } catch (error) {
+      console.error('[' + PLUGIN_ID + '] mask views failed:', error);
+    }
+  }
+
+  suspendForBackground() {
+    if (!this.isUnlocked()) return;
+    this.suspended = true;
+    this.clearViewScreens();
+    this.maskAllViews();
+  }
+
+  handleVisibilityChange() {
+    const hidden = typeof document !== 'undefined' && document ? !!document.hidden : false;
+    if (hidden) {
+      this.hiddenAt = this.hiddenAt || Date.now();
+      this.suspendForBackground();
+      return;
+    }
+    const elapsed = this.hiddenAt ? Date.now() - this.hiddenAt : 0;
+    this.hiddenAt = 0;
+    if (elapsed >= HIDDEN_LOCK_MS) {
+      this.lockFromBackground();
+      return;
+    }
+    // 未超过 60 秒也保持遮罩，必须重新验证主密码才能继续查看
+    if (this.isUnlocked()) this.suspendForBackground();
+  }
+
+  handleWindowBlur() {
+    if (typeof document !== 'undefined' && document && document.hidden) return;
+    this.suspendForBackground();
+  }
+
   checkAutoLock() {
     if (!this.isUnlocked()) return;
+    if (this.hiddenAt && Date.now() - this.hiddenAt >= HIDDEN_LOCK_MS) {
+      this.lockFromBackground();
+      return;
+    }
     if (Date.now() >= this.idleDeadline) {
       this.lock();
       new Notice(this.t('notice_auto_locked'), 6000);

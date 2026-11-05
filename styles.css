@@ -75,6 +75,7 @@
   resize: vertical;
   font-family: var(--font-monospace);
   line-height: 1.4;
+  -webkit-user-drag: none;
 }
 
 .xsv-error {
@@ -238,3 +239,33 @@
   flex-direction: column;
   gap: 10px;
 }
+
+/* 失焦/切后台遮罩：覆盖整个窗口，阻止继续查看已打开的明文 */
+.xsv-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--background-primary);
+}
+
+.xsv-mask-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 320px;
+  padding: 20px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-s);
+}
+
+.xsv-mask .xsv-input {
+  background: var(--background-primary);
+}
+
