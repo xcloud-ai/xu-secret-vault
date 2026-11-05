@@ -1,0 +1,240 @@
+.xsv-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 12px;
+}
+
+.xsv-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xsv-header-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xsv-title {
+  font-size: 1.05em;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.xsv-subtitle {
+  font-size: 0.82em;
+  color: var(--text-muted);
+}
+
+.xsv-desc {
+  font-size: 0.88em;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.xsv-hint {
+  font-size: 0.78em;
+  line-height: 1.45;
+  color: var(--text-faint);
+  border-left: 2px solid var(--background-modifier-border);
+  padding-left: 8px;
+}
+
+.xsv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.xsv-label {
+  font-size: 0.84em;
+  color: var(--text-muted);
+}
+
+.xsv-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font-size: 0.9em;
+  color: var(--text-normal);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.xsv-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.xsv-textarea {
+  resize: vertical;
+  font-family: var(--font-monospace);
+  line-height: 1.4;
+}
+
+.xsv-error {
+  font-size: 0.84em;
+  line-height: 1.45;
+  color: var(--text-error);
+}
+
+.xsv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.xsv-actions-start {
+  justify-content: flex-start;
+}
+
+.xsv-btn {
+  padding: 4px 12px;
+  font-size: 0.86em;
+  color: var(--text-normal);
+  background: var(--interactive-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.xsv-btn:hover {
+  background: var(--interactive-hover);
+}
+
+.xsv-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.xsv-btn-primary {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+
+.xsv-btn-primary:hover {
+  background: var(--interactive-accent-hover);
+}
+
+.xsv-btn-small {
+  padding: 2px 8px;
+  font-size: 0.8em;
+}
+
+.xsv-btn-danger {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+.xsv-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.xsv-search {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xsv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.xsv-empty {
+  padding: 14px 8px;
+  font-size: 0.86em;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.xsv-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+.xsv-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.xsv-item-name {
+  font-weight: 600;
+  color: var(--text-normal);
+  word-break: break-word;
+}
+
+.xsv-badge {
+  padding: 1px 6px;
+  font-size: 0.72em;
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  border-radius: 10px;
+}
+
+.xsv-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.xsv-tag {
+  padding: 1px 6px;
+  font-size: 0.72em;
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+}
+
+.xsv-content-wrap {
+  min-height: 1.4em;
+}
+
+.xsv-content {
+  padding: 6px 8px;
+  font-family: var(--font-monospace);
+  font-size: 0.84em;
+  line-height: 1.4;
+  color: var(--text-normal);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+.xsv-masked {
+  font-family: var(--font-monospace);
+  letter-spacing: 2px;
+  color: var(--text-faint);
+}
+
+.xsv-note {
+  font-size: 0.8em;
+  line-height: 1.4;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.xsv-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
