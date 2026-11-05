@@ -1,4 +1,4 @@
-/* XU Secret Vault 0.1.3 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
+/* XU Secret Vault 0.1.4 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
 'use strict';
 
 const fs = require('fs');
@@ -220,6 +220,9 @@ let clipboard = '';
 let clipboardReadFailure = false;
 let writeBehavior = null; // null | 'throw-before' | 'throw-partial'
 let renameCorruptOnce = false; // 模拟 rename 后终检失败（用于测试 .bak 回滚）
+let rollbackWriteFailure = false; // 模拟回滚时恢复 tmp 写失败
+let armRollbackFailureOnce = false; // 首次 rename 成功后开启回滚写失败
+let removeFailure = false; // 模拟删除原文件失败（无 .bak 的回滚分支）
 let afterReadHook = null; // 读取后注入外部改动（模拟 TOCTOU 窗口）
 let activePlugin = null;
 
@@ -238,6 +241,9 @@ const app = {
         return text;
       },
       write: async (filePath, text) => {
+        if (rollbackWriteFailure && String(filePath).indexOf('.tmp-') >= 0) {
+          throw new Error('simulated rollback write failure');
+        }
         if (writeBehavior === 'throw-before') throw new Error('simulated disk failure');
         if (writeBehavior === 'throw-partial') {
           // 模拟"写到一半"：先把截断内容落盘，再抛错
@@ -253,12 +259,21 @@ const app = {
           // rename 成功但落盘内容损坏：触发 rename 后的终检失败与 .bak 回滚
           fileStore.set(toPath, 'CORRUPTED');
           fileStore.delete(fromPath);
+          if (armRollbackFailureOnce) {
+            armRollbackFailureOnce = false;
+            rollbackWriteFailure = true;
+          }
           return;
         }
         fileStore.set(toPath, fileStore.get(fromPath));
         fileStore.delete(fromPath);
+        if (armRollbackFailureOnce) {
+          armRollbackFailureOnce = false;
+          rollbackWriteFailure = true;
+        }
       },
       remove: async (filePath) => {
+        if (removeFailure && filePath === VAULT_PATH) throw new Error('simulated remove failure');
         fileStore.delete(filePath);
       },
       stat: async (filePath) =>
@@ -450,7 +465,7 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.1.3',
+    version: '0.1.4',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
@@ -848,6 +863,8 @@ try {
   ok(plugin.suspended === false, '重验后退出挂起态');
   leaves.splice(leaves.indexOf(leaf2), 1);
   await view2.onClose();
+  ok(plugin.isUnlocked() === false, '关闭新开面板后插件保持锁定，不会误解锁');
+  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '旧面板回到锁定界面且不含明文');
 
   // 11c) 合盖休眠：单调钟（performance.now）不前进、墙钟前进 20 分钟 → 必须锁定（M-04）
   await unlockFresh(MASTER);
@@ -934,6 +951,54 @@ try {
   ok((await unlockFresh(MASTER)) === true, '终检回滚后旧库仍可解锁');
   ok(plugin.entries.length === entriesBefore, '终检回滚后条目内容仍正确');
   view.render();
+
+  // 14c) 回滚失败：保留 .bak，错误文案给出可恢复路径
+  const beforeRollback = goodText();
+  renameCorruptOnce = true;
+  armRollbackFailureOnce = true;
+  let rollbackError = null;
+  try {
+    await plugin.addEntry({ name: 'RollbackFail', type: 'note', content: SECRET_TWO });
+  } catch (error) {
+    rollbackError = error;
+  }
+  rollbackWriteFailure = false;
+  renameCorruptOnce = false;
+  armRollbackFailureOnce = false;
+  const bakPath = VAULT_PATH + '.bak';
+  ok(rollbackError !== null, '回滚失败时写操作报错');
+  ok(String(rollbackError && rollbackError.message).indexOf(bakPath) >= 0, '错误文案包含 .bak 恢复路径');
+  ok(fileStore.has(bakPath), '回滚失败时保留 .bak 文件');
+  fileStore.set(VAULT_PATH, fileStore.get(bakPath));
+  fileStore.delete(bakPath);
+  plugin.lock();
+  ok((await unlockFresh(MASTER)) === true, '按恢复路径从旧密文恢复后仍可解锁');
+  ok(plugin.entries.length === entriesBefore, '恢复后条目数量正确');
+
+  // 14d) 原文件本不存在：没有 .bak，文案不得指向不存在的文件
+  plugin.lock();
+  fileStore.delete(VAULT_PATH);
+  renameCorruptOnce = true;
+  removeFailure = true;
+  let createError = null;
+  try {
+    await plugin.createVault(MASTER);
+  } catch (error) {
+    createError = error;
+  }
+  removeFailure = false;
+  renameCorruptOnce = false;
+  ok(createError !== null, '无原文件时创建失败仍抛出异常');
+  ok(
+    String(createError && createError.message).indexOf('.bak') < 0 &&
+      String(createError && createError.message).indexOf('已保留旧密文备份') < 0,
+    '未生成 .bak 时文案不指向不存在的文件'
+  );
+  ok(!fileStore.has(VAULT_PATH + '.bak'), '未生成 .bak 时不出现备份文件');
+  fileStore.set(VAULT_PATH, beforeRollback);
+  plugin.lock();
+  ok((await unlockFresh(MASTER)) === true, '恢复正式库后仍可解锁');
+  ok(plugin.entries.length === entriesBefore, '恢复正式库后条目数量正确');
 
   // 15) 同步冲突：外部改动后拒绝覆盖，另存 conflict 副本（D-06 / S-02 / S-09）
   const hashBeforeConflict = plugin.knownBlobHash;
@@ -1104,10 +1169,60 @@ try {
   findButton(view.contentEl, '解锁').click();
   await waitFor(() => plugin.isUnlocked(), '加载所选冲突副本');
   ok(plugin.entries.length === 1 && plugin.entries[0].content === SECRET_ONE, '从所选副本加载内容');
+
+  // 19d-2) 副本只读：隐藏写入口、显示横幅、保留复制；写操作拒绝且两个文件字节都不变
+  view.render();
+  ok(plugin.isReadOnlyCopy() === true, '选中副本后进入只读态');
+  ok(String(textOf(view.contentEl)).indexOf('正在查看冲突副本（只读）') >= 0, '显示只读横幅');
+  ok(String(textOf(view.contentEl)).indexOf('不会写回正式保险库') >= 0, '横幅明确不会写回正式库');
+  ok(!findButton(view.contentEl, '新增'), '只读态隐藏新增入口');
+  ok(!findButton(view.contentEl, '编辑'), '只读态隐藏编辑入口');
+  ok(!findButton(view.contentEl, '删除'), '只读态隐藏删除入口');
+  ok(!!findButton(view.contentEl, '复制'), '只读态保留复制入口');
+  const canonicalBeforeWrite = fileStore.get(VAULT_PATH);
+  const copyBeforeWrite = fileStore.get(conflictCopy);
+  await rejects(
+    plugin.addEntry({ name: 'CopyWrite', type: 'note', content: SECRET_TWO }),
+    '只读',
+    '负向：只读副本上的新增被拒'
+  );
+  await rejects(
+    plugin.updateEntry(plugin.entries[0].id, { name: 'CopyEdit', type: 'note', content: SECRET_TWO }),
+    '只读',
+    '负向：只读副本上的编辑被拒'
+  );
+  await rejects(
+    plugin.deleteEntry(plugin.entries[0].id),
+    '只读',
+    '负向：只读副本上的删除被拒'
+  );
+  ok(fileStore.get(VAULT_PATH) === canonicalBeforeWrite, '正式库文件字节未变');
+  ok(fileStore.get(conflictCopy) === copyBeforeWrite, '副本文件字节未变');
+
   plugin.lock();
   await plugin.scanVaultSources();
   ok(plugin.selectedVaultPath === '' && plugin.getVaultPath() === VAULT_PATH, '锁定后选择回到正式库');
+  ok(plugin.isReadOnlyCopy() === false, '锁定后只读态复位');
   fileStore.delete(conflictCopy);
+
+  // 19e) 嵌套冲突副本（xxx.conflict-a.conflict-b.enc）也能被枚举，且按时间倒序
+  const oldCopy = VAULT_PATH.replace(/\.enc$/i, '') + '.conflict-20200101-000000.enc';
+  const nestedCopy =
+    VAULT_PATH.replace(/\.enc$/i, '') + '.conflict-20200101-000000.conflict-20200102-000000.enc';
+  fileStore.set(oldCopy, fileStore.get(VAULT_PATH));
+  fileStore.set(nestedCopy, fileStore.get(VAULT_PATH));
+  await plugin.lock();
+  await plugin.scanVaultSources();
+  ok(plugin.vaultSources.length === 3, '正式库与两层/单层冲突副本都被枚举');
+  ok(plugin.vaultSources.indexOf(nestedCopy) >= 0, '嵌套冲突副本进入候选列表');
+  ok(plugin.vaultSources[0] === VAULT_PATH, '存在嵌套副本时默认仍指向正式库');
+  ok(plugin.selectedVaultPath === '', '嵌套副本不会被自动选中');
+  ok(
+    plugin.vaultSources.indexOf(nestedCopy) < plugin.vaultSources.indexOf(oldCopy),
+    '候选副本按冲突时间倒序'
+  );
+  fileStore.delete(oldCopy);
+  fileStore.delete(nestedCopy);
 
   // 20) crypto.subtle 不可用时明确报错
   plugin.lock();

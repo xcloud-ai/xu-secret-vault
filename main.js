@@ -139,6 +139,8 @@ const I18N = {
     label_vault_source: '选择要加载的保险库文件',
     hint_vault_source: '检测到冲突副本。插件不会自动挑选，请确认要解锁的是哪一个文件。',
     err_rollback_kept: '自动回滚未成功，已保留旧密文备份：{path}',
+    err_conflict_copy_readonly: '正在查看冲突副本（只读）。它不会写回正式保险库；如需采用其中的内容，请先备份正式库并手动重命名该副本。',
+    readonly_copy_path: '当前文件：{path}',
     notice_background_locked: '插件在后台超过 60 秒，保险库已自动锁定。',
     notice_reverify_failed: '验证失败，请重新输入主密码。',
     mask_title: '内容已隐藏',
@@ -250,6 +252,8 @@ const I18N = {
     label_vault_source: 'Vault file to load',
     hint_vault_source: 'Conflict copies were found. Nothing is picked automatically — choose the file you want to unlock.',
     err_rollback_kept: 'Automatic rollback failed; the previous ciphertext backup was kept at {path}.',
+    err_conflict_copy_readonly: 'You are viewing a conflict copy (read-only). Changes are never written back to the official vault; to adopt its contents, back up the official vault first and rename this copy manually.',
+    readonly_copy_path: 'Current file: {path}',
     notice_background_locked: 'The plugin was in the background for over 60 seconds, so the vault was locked.',
     notice_reverify_failed: 'Verification failed. Enter the master password again.',
     mask_title: 'Content hidden',
@@ -817,8 +821,11 @@ class SecretVaultView extends ItemView {
     lockButton.addEventListener('click', () => this.plugin.lock());
 
     // 冲突后内存快照已过期：必须重载才能继续编辑，避免基于旧数据再次另存副本
-    const readOnly = !!this.plugin.conflictPending;
-    if (readOnly) this.renderConflictBanner(root);
+    // 查看冲突副本时同样只读：副本上的改动不会写回正式库
+    const copyReadOnly = this.plugin.isReadOnlyCopy();
+    const readOnly = !!this.plugin.conflictPending || copyReadOnly;
+    if (copyReadOnly) this.renderCopyReadonlyBanner(root);
+    else if (readOnly) this.renderConflictBanner(root);
 
     root.createDiv({ cls: 'xsv-hint', text: this.plugin.t('hint_encrypted') });
 
@@ -861,6 +868,15 @@ class SecretVaultView extends ItemView {
       return;
     }
     for (const entry of entries) this.renderEntry(list, entry, readOnly);
+  }
+
+  renderCopyReadonlyBanner(root) {
+    const banner = root.createDiv({ cls: 'xsv-conflict-banner' });
+    banner.createDiv({ cls: 'xsv-desc', text: this.plugin.t('err_conflict_copy_readonly') });
+    banner.createDiv({
+      cls: 'xsv-hint',
+      text: this.plugin.t('readonly_copy_path', { path: this.plugin.getVaultPath() }),
+    });
   }
 
   renderConflictBanner(root) {
@@ -943,6 +959,10 @@ class SecretVaultView extends ItemView {
     }
     if (this.plugin.conflictPending) {
       new Notice(this.plugin.t('err_conflict_editing_blocked'), 6000);
+      return;
+    }
+    if (this.plugin.isReadOnlyCopy()) {
+      new Notice(this.plugin.t('err_conflict_copy_readonly'), 8000);
       return;
     }
     new SecretEntryModal(this.app, this.plugin, null).open();
@@ -1320,22 +1340,32 @@ class XUSecretVault extends Plugin {
     return this.normalizeVaultPath(selected || this.settings.vaultPath);
   }
 
+  // 当前会话是否正在查看冲突副本：此时一律只读，任何写操作都不能落到副本上
+  // （锁定后 selectedVaultPath 会复位，从而自动回到正式库的可写状态）
+  isReadOnlyCopy() {
+    return this.getVaultPath() !== this.normalizeVaultPath(this.settings.vaultPath);
+  }
+
   // 解锁前枚举候选库文件：正式库 + 同 stem 的 conflict 副本，交给用户显式选择
   async scanVaultSources() {
     const adapter = this.app.vault.adapter;
     const canonical = this.normalizeVaultPath(this.settings.vaultPath);
-    const sources = [];
+    let canonicalExists = false;
     try {
-      if (await adapter.exists(canonical)) sources.push(canonical);
+      canonicalExists = await adapter.exists(canonical);
     } catch (error) {
       /* ignore */
     }
+    const extras = [];
     if (typeof adapter.list === 'function') {
       const slash = canonical.lastIndexOf('/');
       const dir = slash < 0 ? '' : canonical.slice(0, slash);
       const base = slash < 0 ? canonical : canonical.slice(slash + 1);
       const stem = escapeRegExp(base.replace(/\.enc$/i, ''));
-      const sourceRe = new RegExp('^' + stem + '\\.conflict-([0-9]{8}-[0-9]{6}(?:-[0-9]+)?\\.enc)$');
+      // 允许一个或多个 .conflict-YYYYMMDD-HHMMSS[-n] 段，覆盖嵌套冲突副本
+      const sourceRe = new RegExp(
+        '^' + stem + '((?:\\.conflict-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?)+)\\.enc$'
+      );
       let listed = null;
       try {
         listed = await adapter.list(dir);
@@ -1345,17 +1375,19 @@ class XUSecretVault extends Plugin {
       if (listed && Array.isArray(listed.files)) {
         for (const file of listed.files) {
           const name = String(file).slice(String(file).lastIndexOf('/') + 1);
-          if (!sourceRe.test(name)) continue;
-          const full = dir ? dir + '/' + name : name;
-          if (sources.indexOf(full) < 0) sources.push(full);
+          const match = sourceRe.exec(name);
+          if (!match) continue;
+          const stamps = match[1].match(/[0-9]{8}-[0-9]{6}/g) || [];
+          extras.push({
+            full: dir ? dir + '/' + name : name,
+            stamp: stamps.length ? stamps[stamps.length - 1] : '',
+          });
         }
       }
     }
-    sources.sort((left, right) => {
-      if (left === canonical) return -1;
-      if (right === canonical) return 1;
-      return left.localeCompare(right);
-    });
+    // 正式库固定第一；其余按最后一次冲突时间倒序（同一时间再按文件名稳定排序）
+    extras.sort((left, right) => right.stamp.localeCompare(left.stamp) || left.full.localeCompare(right.full));
+    const sources = (canonicalExists ? [canonical] : []).concat(extras.map((item) => item.full));
     this.vaultSources = sources;
     this.refreshViews();
     return sources;
@@ -1717,8 +1749,8 @@ class XUSecretVault extends Plugin {
               /* ignore */
             }
           }
-          // 回滚失败时保留 .bak，并在报错里给出恢复路径
-          if (error && typeof error === 'object' && typeof error.message === 'string') {
+          // 回滚失败时保留 .bak，并在报错里给出恢复路径；原文件本不存在时没有 .bak，不得指向不存在的文件
+          if (backupWritten && error && typeof error === 'object' && typeof error.message === 'string') {
             error.message = error.message + ' ' + this.t('err_rollback_kept', { path: bakPath });
           }
         }
@@ -1779,6 +1811,7 @@ class XUSecretVault extends Plugin {
     if (!this.isUnlocked()) throw new Error(this.t('notice_unlock_first'));
     if (this.suspended) throw new Error(this.t('err_suspended'));
     if (this.conflictPending) throw new Error(this.t('err_conflict_editing_blocked'));
+    if (this.isReadOnlyCopy()) throw new Error(this.t('err_conflict_copy_readonly'));
     const generation = this.sessionGeneration;
     const key = this.sessionKey;
     const salt = this.sessionSalt;
@@ -2150,6 +2183,8 @@ class XUSecretVault extends Plugin {
     // 遮罩/挂起期间必须重新验证后才能读写
     if (this.suspended) throw new Error(this.t('err_suspended'));
     if (this.conflictPending) throw new Error(this.t('err_conflict_editing_blocked'));
+    // 冲突副本只读：写入副本会在锁定后静默丢弃，因此所有写操作都同一文案拒绝
+    if (this.isReadOnlyCopy()) throw new Error(this.t('err_conflict_copy_readonly'));
     this.touchActivity();
   }
 
