@@ -8,7 +8,7 @@ const { webcrypto } = require('crypto');
 const { subtle } = webcrypto;
 
 const MAIN = path.join(__dirname, '..', 'main.js');
-const VAULT_PATH = 'xu-secrets.enc';
+const VAULT_PATH = 'xu-secrets/我的密钥.enc';
 
 const MASTER = 'MASTER-PASSWORD-DO-NOT-LEAK-789';
 const SECRET_ONE = 'SECRET-ALPHA-DO-NOT-LEAK-123';
@@ -310,17 +310,30 @@ const app = {
         fileStore.delete(filePath);
       },
       stat: async (filePath) =>
-        fileStore.has(filePath) ? { size: Buffer.byteLength(fileStore.get(filePath), 'utf8') } : null,
+        fileStore.has(filePath)
+          ? { size: Buffer.byteLength(fileStore.get(filePath), 'utf8'), mtime: 1700000000000 }
+          : null,
       mkdir: async (dirPath) => {
         createdDirs.add(dirPath);
       },
-      list: async (dirPath) => ({
-        files: Array.from(fileStore.keys()).filter((key) => {
-          const slash = key.lastIndexOf('/');
-          return slash < 0 ? dirPath === '' : key.slice(0, slash) === dirPath;
-        }),
-        folders: [],
-      }),
+      list: async (dirPath) => {
+        const prefix = dirPath ? dirPath + '/' : '';
+        const files = [];
+        const folders = new Set();
+        for (const key of fileStore.keys()) {
+          if (!key.startsWith(prefix)) continue;
+          const rest = key.slice(prefix.length);
+          const slash = rest.indexOf('/');
+          if (slash >= 0) folders.add(prefix + rest.slice(0, slash));
+          else files.push(prefix + rest);
+        }
+        for (const dir of createdDirs) {
+          if (!dir || !dir.startsWith(prefix)) continue;
+          const rest = dir.slice(prefix.length);
+          if (rest && rest.indexOf('/') < 0) folders.add(dir);
+        }
+        return { files, folders: Array.from(folders) };
+      },
     },
   },
   workspace: {
@@ -519,7 +532,7 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.3.3',
+    version: '0.4.0',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
@@ -2307,8 +2320,175 @@ try {
   plugin.settings.language = 'zh';
   await plugin.saveSettings();
 
+  // 25) 0.4.0 多保险库文件 + 分组
+  const oldPath = plugin.getVaultPath();
+  const oldBody = plugin.notes[0] ? plugin.notes[0].body : '';
+  notices.length = 0;
+  const groupCreated = await plugin.createVaultFile('工作组/密码本', '');
+  ok(groupCreated.ok === true, '新建文件成功（名称可含 组/名字）');
+  const newPath = 'xu-secrets/工作组/密码本.enc';
+  ok(fileStore.has(newPath), '新文件按分组目录落盘并强制 .enc 后缀');
+  ok(plugin.getVaultPath() === newPath, '新建后自动选中新文件');
+  ok(plugin.notes.length === 1 && plugin.notes[0].body === '', '新文件从空笔记开始');
+  ok(
+    plugin.vaultFiles.some((file) => file.path === newPath && file.group === '工作组'),
+    '文件列表识别出分组'
+  );
+  ok(
+    plugin.vaultFiles.some((file) => file.path === oldPath),
+    '旧文件仍在列表里（不迁移、不删除）'
+  );
+  view.render();
+  ok(findAll(view.contentEl, (el) => el.hasClass('xsv-file-panel')).length === 1, '左侧文件面板渲染');
+  ok(!!findButton(view.contentEl, '新建文件'), '文件面板顶部有「新建文件」');
+  ok(
+    findAll(view.contentEl, (el) => el.hasClass('xsv-group-header')).length >= 2,
+    '列表按分组折叠渲染'
+  );
+  ok(
+    findAll(view.contentEl, (el) => el.hasClass('xsv-file-item')).length === plugin.vaultFiles.length,
+    '每个文件一行'
+  );
+  ok(textOf(view.contentEl).indexOf('修改于') >= 0, '文件行显示修改时间');
+
+  // 25b) 三个 UI 问题：标题只一处、示例无 {{}}、表格与说明行只渲染一次
+  const sampleBody = view.buildSampleNote();
+  ok(sampleBody.indexOf('{{') < 0, '示例表格不再包含 {{}} 引用语法');
+  ok(sampleBody.indexOf('your-github-name') >= 0, '示例使用普通占位值');
+  await plugin.saveNote('note-primary', sampleBody);
+  view.render();
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-note-title')).length, '页面头部不再重复渲染标题');
+  ok(
+    findAll(view.contentEl, (el) => el.tagName === 'H1' && textOf(el) === '我的密钥').length === 1,
+    '正文标题只出现一次'
+  );
+  const renderedTables = findAll(view.contentEl, (el) => el.tagName === 'TABLE' && el.hasClass('xsv-md-table'));
+  ok(renderedTables.length === 1, '示例表格只渲染一次');
+  const sampleFootnotes = String(textOf(view.contentEl)).match(/表格默认全部按原文显示/g) || [];
+  ok(sampleFootnotes.length === 1, '表下说明行只出现一次');
+
+  // 25c) 切换文件：内容互不串
+  const switchedBack = await plugin.switchVaultFile(oldPath);
+  ok(switchedBack === true, '切回旧文件成功');
+  ok(plugin.getVaultPath() === oldPath, '当前文件指针已切回');
+  ok(plugin.notes[0].body === oldBody, '切换文件后旧文件内容原样恢复');
+  ok(plugin.notes[0].body.indexOf(sampleBody) < 0, '负向：新文件内容没有串进旧文件');
+  ok((await plugin.switchVaultFile(newPath)) === true, '再次切到新文件成功');
+  ok(plugin.notes[0].body === sampleBody, '新文件保存的内容在切换后仍存在');
+  ok(plugin.notes[0].body.indexOf(oldBody) < 0 || oldBody === '', '负向：旧文件内容没有串进新文件');
+
+  // 25d) 首次打开未缓存文件：一次 KDF + loading 状态可见
+  plugin.fileSessions.delete(oldPath);
+  const pendingSwitch = plugin.switchVaultFile(oldPath);
+  ok(plugin.fileLoading === oldPath, '未缓存文件切换时显示 loading 状态');
+  ok((await pendingSwitch) === true, '未缓存文件用主密码派生一次密钥后打开成功');
+  ok(plugin.fileSessions.has(oldPath), '打开后该文件的派生密钥被缓存（再切不重复 KDF）');
+
+  // 25e) 同名拒绝
+  notices.length = 0;
+  const duplicate = await plugin.createVaultFile('密码本', '工作组');
+  ok(duplicate.ok === false && duplicate.reason === 'exists', '同分组同名文件被拒绝');
+  ok(notices.some((message) => message.indexOf('同名文件已存在') >= 0), '重名时给出明确提示');
+  notices.length = 0;
+  const duplicateNested = await plugin.createVaultFile('工作组/密码本', '');
+  ok(duplicateNested.ok === false, '组/名字形式的重名同样被拒绝');
+
+  // 25f) 文件名清洗
+  notices.length = 0;
+  const sanitized = await plugin.createVaultFile('名:字?', '坏/组');
+  ok(sanitized.ok === true, '非法字符清洗后仍可创建');
+  const sanitizedPath = sanitized.path;
+  ok(!/[:?*<>|\\]/ .test(sanitizedPath), '落盘路径不含非法字符');
+  ok(/\.enc$/.test(sanitizedPath), '落盘路径强制 .enc 后缀');
+  ok(fileStore.has(sanitizedPath), '清洗后的文件已写入');
+  await plugin.deleteVaultFile(sanitizedPath);
+  ok(!fileStore.has(sanitizedPath), '删除文件后磁盘文件消失');
+
+  // 25g) 错误密码文件：明确提示、保持当前文件、不覆盖目标
+  await plugin.switchVaultFile(newPath);
+  const wrongPath = 'xu-secrets/工作组/别的密码.enc';
+  const wrongText = JSON.stringify(await buildV2EnvelopeWithoutNotes('OTHER-MASTER', []));
+  fileStore.set(wrongPath, wrongText);
+  notices.length = 0;
+  const beforeWrongPath = plugin.getVaultPath();
+  const beforeWrongBody = plugin.notes[0].body;
+  const wrongSwitch = await plugin.switchVaultFile(wrongPath);
+  ok(wrongSwitch === false, '错误密码文件拒绝打开');
+  ok(plugin.getVaultPath() === beforeWrongPath, '失败后保持当前文件不变');
+  ok(plugin.notes[0].body === beforeWrongBody, '失败后当前内容不被清空');
+  ok(
+    notices.some((message) => message.indexOf('该文件不是用当前主密码加密') >= 0),
+    '错误密码给出专门提示'
+  );
+  ok(fileStore.get(wrongPath) === wrongText, '负向：失败不自动覆盖目标文件（保留原字节）');
+
+  // 25h) 分组折叠与展开
+  view.render();
+  ok(
+    findAll(view.contentEl, (el) => el.hasClass('xsv-group-body')).some(
+      (body) => textOf(body).indexOf('密码本') >= 0
+    ),
+    '当前文件所在分组默认展开'
+  );
+  await plugin.toggleGroupCollapsed('工作组');
+  ok(plugin.settings.collapsedGroups.indexOf('工作组') >= 0, '分组折叠状态写入配置');
+  view.render();
+  ok(
+    !findAll(view.contentEl, (el) => el.hasClass('xsv-group-body')).some((body) => textOf(body).indexOf('密码本') >= 0),
+    '折叠后该组文件行不再渲染'
+  );
+  await plugin.toggleGroupCollapsed('工作组');
+  ok(plugin.settings.collapsedGroups.indexOf('工作组') < 0, '再次点击展开分组');
+
+  // 25i) 重命名/移动 = 移动分组，同名冲突拒绝
+  const renameFrom = plugin.getVaultPath();
+  const renameResult = await plugin.renameVaultFile(renameFrom, '密码本-改名', '工作组/子组');
+  ok(renameResult.ok === true, '重命名/移动文件成功');
+  ok(fileStore.has(renameResult.path), '目标分组文件已存在');
+  ok(!fileStore.has(renameFrom), '原路径已移除');
+  ok(plugin.getVaultPath() === renameResult.path, '当前文件指针跟随移动');
+  const renameDuplicate = await plugin.renameVaultFile(renameResult.path, '别的密码', '工作组');
+  ok(renameDuplicate.ok === false && renameDuplicate.reason === 'exists', '移动时同名目标被拒绝');
+  const movedPath = renameResult.path;
+
+  // 25j) 旧版 <vault>/xu-secrets.enc 兼容：默认加载、不迁移、不删除
+  const legacyText = fileStore.get(VAULT_PATH);
+  fileStore.set('xu-secrets.enc', legacyText);
+  plugin.settings.selectedFile = '';
+  plugin.settings.vaultPath = 'xu-secrets.enc';
+  plugin.selectedFilePath = '';
+  plugin.selectedVaultPath = '';
+  await plugin.scanVaultFiles();
+  ok(
+    plugin.vaultFiles.some((file) => file.path === 'xu-secrets.enc' && file.legacy === true),
+    '旧版 xu-secrets.enc 出现在文件列表中'
+  );
   plugin.lock();
-  console.log('CREATE_MS=' + createMs + '  UNLOCK_MS=' + unlockMs);
+  ok((await plugin.unlock(MASTER)) === true, '旧版 xu-secrets.enc 仍可用当前主密码解锁');
+  ok(plugin.getVaultPath() === 'xu-secrets.enc', '启动时优先加载旧版默认文件');
+  ok(fileStore.has('xu-secrets.enc'), '旧版文件没有被迁移或删除');
+  plugin.settings.vaultPath = VAULT_PATH;
+  plugin.settings.selectedFile = '';
+  plugin.selectedFilePath = '';
+  fileStore.delete('xu-secrets.enc');
+
+  // 25k) 切换后锁定：清空所有文件密钥、主密码与列表，DOM 无明文
+  await plugin.scanVaultFiles();
+  plugin.lock();
+  ok(plugin.fileSessions.size === 0, '锁定后清空所有文件的派生密钥');
+  ok(plugin.sessionPassword === '', '锁定后清空主密码暂存');
+  ok(plugin.vaultFiles.length === 0, '锁定后清空文件列表快照');
+  view.render();
+  ok(textOf(view.contentEl).indexOf('密码本-改名') < 0, '锁定后 DOM 不残留文件名预览');
+  ok(textOf(view.contentEl).indexOf(sampleBody) < 0, '锁定后 DOM 不残留笔记明文');
+
+  // 25l) data.json 只存配置
+  const configText = JSON.stringify(plugin.__savedData);
+  ok(configText.indexOf(MASTER) < 0, 'data.json 不含主密码');
+  ok(configText.indexOf(SECRET_ONE) < 0 && configText.indexOf(SECRET_TWO) < 0, 'data.json 不含笔记明文');
+  ok(configText.indexOf('vaultDir') >= 0 && configText.indexOf('selectedFile') >= 0, 'data.json 只保留目录与界面偏好');
+
+  plugin.lock();
   console.log('ASSERTIONS=' + assertions + '  FAILURES=' + failures.length);
   if (failures.length) {
     console.error('FAILED:');

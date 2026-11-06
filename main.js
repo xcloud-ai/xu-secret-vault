@@ -8,6 +8,14 @@ const VIEW_TYPE = 'xu-secret-vault-page';
 const LEGACY_VIEW_TYPE = 'xu-secret-vault-view';
 const REPO_URL = 'https://github.com/xcloud-ai/xu-secret-vault';
 const DEFAULT_VAULT_PATH = 'xu-secrets.enc';
+// 0.4.0 起：默认存储目录与默认文件名；旧的 <vault>/xu-secrets.enc 作为兼容文件继续可用
+const DEFAULT_VAULT_DIR = 'xu-secrets';
+const DEFAULT_FILE_NAME = '我的密钥';
+const FILE_NAME_MAX = 64;
+const GROUP_NAME_MAX = 64;
+const GROUP_UNGROUPED = '';
+// 冲突副本不进入普通文件列表：它们是同一文件的只读快照
+const CONFLICT_COPY_RE = /\.conflict-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?\.enc$/i;
 const FORMAT_VERSION = 2;
 const LEGACY_FORMAT_VERSION = 1;
 const KDF_ALGO = 'PBKDF2-SHA512';
@@ -62,7 +70,12 @@ const DEFAULT_NOTE_ID = 'note-primary';
 
 const DEFAULT_SETTINGS = {
   language: 'zh',
+  // vaultPath 仅保留给旧版 <vault>/xu-secrets.enc；新文件都在 vaultDir 下
   vaultPath: DEFAULT_VAULT_PATH,
+  vaultDir: DEFAULT_VAULT_DIR,
+  // 当前文件与折叠的分组只算界面偏好，不含任何笔记内容
+  selectedFile: '',
+  collapsedGroups: [],
   autoLockMinutes: 15,
   clipboardClearSeconds: 30,
   backgroundLockSeconds: DEFAULT_BACKGROUND_LOCK_SECONDS,
@@ -112,6 +125,7 @@ const I18N = {
     note_no_entries: '（暂无条目）',
     btn_note_sample: '插入示例表格',
     note_sample_choice: '当前笔记已有内容：要追加到末尾，还是替换全文？',
+    notice_sample_exists: '示例表格已在笔记中，无需重复插入。',
     btn_sample_append: '追加到末尾',
     btn_sample_replace: '替换全文',
     note_guide_title: '从这里开始写账号表',
@@ -121,6 +135,32 @@ const I18N = {
     notice_cell_copied: '已复制',
     note_empty: '这篇笔记还没有内容，点击「编辑笔记」开始写 Markdown。',
     note_editor_hint: '支持 Markdown：标题、列表、粗体、行内代码、管道表格、链接（仅 http/https）。表格单元格按纯文本显示与复制，可用 \\| 表示单元格内的竖线、\\\\ 表示反斜杠，其它反斜杠保持原样。',
+    files_title: '文件',
+    btn_new_file: '新建文件',
+    files_empty: '还没有文件，点击「新建文件」创建第一个保险库。',
+    files_loading: '正在打开文件并校验密钥…',
+    group_ungrouped: '未分组',
+    group_file_count: '{count} 个',
+    file_mtime: '修改于 {time}',
+    new_file_title: '新建保险库文件',
+    new_file_name: '文件名',
+    new_file_name_hint: '可写成「组/名字」层级；会自动补 .enc，同名会被拒绝。',
+    new_file_group: '分组',
+    new_file_group_new: '＋ 新建分组…',
+    new_file_group_name: '新分组名（可用 / 分层）',
+    new_file_plaintext_warn: '文件名与分组名在文件系统中是明文可见的，只有内容加密。',
+    rename_file_title: '重命名 / 移动文件',
+    btn_rename_file: '重命名',
+    btn_delete_file: '删除',
+    confirm_delete_file: '删除文件「{name}」？此操作不可撤销，文件内容会一起删除。',
+    notice_file_created: '已创建文件「{name}」。',
+    notice_file_renamed: '已重命名文件「{name}」。',
+    notice_file_deleted: '文件已删除。',
+    err_file_wrong_password: '该文件不是用当前主密码加密，已保持当前文件不变。',
+    err_file_name_exists: '同名文件已存在，请换一个名字或分组。',
+    err_file_name_invalid: '文件名为空，或清洗后没有可用字符。',
+    err_group_name_invalid: '分组名为空，或清洗后没有可用字符。',
+    err_session_password_lost: '会话中缺少主密码，请重新解锁后再打开这个文件。',
     err_note_missing: '笔记不存在或已被移除。',
     btn_cancel: '取消',
     btn_save: '保存',
@@ -172,8 +212,10 @@ const I18N = {
     setting_group_about: '关于',
     setting_language: '界面语言',
     setting_language_desc: '切换中文 / English。',
-    setting_vault_path: '保险库文件路径',
-    setting_vault_path_desc: '相对 vault 根目录的路径，必须以 .enc 结尾（缺失时自动补全）。默认 xu-secrets.enc。',
+    setting_vault_path: '旧版保险库文件路径（仅兼容）',
+    setting_vault_path_desc: '仅用于兼容 0.3.x 的 <vault>/xu-secrets.enc。存在时启动会作为默认文件加载，不会迁移、不会删除；新文件都创建在下方目录里。',
+    setting_vault_directory: '保险库目录',
+    setting_vault_directory_desc: '相对 vault 根目录，默认 xu-secrets。目录下所有 .enc（含子目录）都会出现在左侧文件列表；文件名与分组名在文件系统中是明文可见的，只有内容加密。',
     setting_auto_lock: '自动锁定（分钟）',
     setting_auto_lock_desc: '无操作超过该时长后自动锁定（默认 15 分钟）；切到后台超过 60 秒也会立即锁定，并清除内存中的密钥与已显形的明文。',
     setting_bg_lock: '失焦锁定倒计时',
@@ -278,6 +320,7 @@ const I18N = {
     note_no_entries: '(no entries)',
     btn_note_sample: 'Insert sample table',
     note_sample_choice: 'This note already has content: append to the end, or replace everything?',
+    notice_sample_exists: 'The sample table is already in this note; no need to insert it again.',
     btn_sample_append: 'Append',
     btn_sample_replace: 'Replace all',
     note_guide_title: 'Start your account table here',
@@ -287,6 +330,32 @@ const I18N = {
     notice_cell_copied: 'Copied',
     note_empty: 'This note is empty. Click "Edit note" to start writing Markdown.',
     note_editor_hint: 'Markdown support: headings, lists, bold, inline code, pipe tables and links (http/https only). Table cells are shown and copied as literal text; use \\| for a pipe inside a cell and \\\\ for a backslash; other backslash sequences stay as-is.',
+    files_title: 'Files',
+    btn_new_file: 'New file',
+    files_empty: 'No files yet. Click "New file" to create the first vault.',
+    files_loading: 'Opening file and verifying the key…',
+    group_ungrouped: 'Ungrouped',
+    group_file_count: '{count} files',
+    file_mtime: 'Modified {time}',
+    new_file_title: 'New vault file',
+    new_file_name: 'File name',
+    new_file_name_hint: 'You can use "group/name"; .enc is appended automatically and duplicates are rejected.',
+    new_file_group: 'Group',
+    new_file_group_new: '+ New group…',
+    new_file_group_name: 'New group name (may use / for nesting)',
+    new_file_plaintext_warn: 'File and group names are visible in plaintext on disk; only contents are encrypted.',
+    rename_file_title: 'Rename / move file',
+    btn_rename_file: 'Rename',
+    btn_delete_file: 'Delete',
+    confirm_delete_file: 'Delete file "{name}"? This cannot be undone and its contents will be deleted too.',
+    notice_file_created: 'Created file "{name}".',
+    notice_file_renamed: 'Renamed file "{name}".',
+    notice_file_deleted: 'File deleted.',
+    err_file_wrong_password: 'This file is not encrypted with the current master password. The current file was left unchanged.',
+    err_file_name_exists: 'A file with that name already exists. Choose another name or group.',
+    err_file_name_invalid: 'The file name is empty or has no usable characters after sanitizing.',
+    err_group_name_invalid: 'The group name is empty or has no usable characters after sanitizing.',
+    err_session_password_lost: 'The session has no master password. Unlock again before opening this file.',
     err_note_missing: 'The note does not exist or has been removed.',
     btn_cancel: 'Cancel',
     btn_save: 'Save',
@@ -338,8 +407,10 @@ const I18N = {
     setting_group_about: 'About',
     setting_language: 'Language',
     setting_language_desc: 'Switch between Chinese and English.',
-    setting_vault_path: 'Vault file path',
-    setting_vault_path_desc: 'Path relative to the vault root. It must end with .enc (added automatically if missing). Default: xu-secrets.enc.',
+    setting_vault_path: 'Legacy vault file path (compat only)',
+    setting_vault_path_desc: 'Kept for 0.3.x <vault>/xu-secrets.enc compatibility. If present it is loaded as the default file and is never migrated or deleted; new files are created in the directory below.',
+    setting_vault_directory: 'Vault directory',
+    setting_vault_directory_desc: 'Relative to the vault root, default xu-secrets. Every .enc under it (including subfolders) appears in the file list. File and group names are visible in plaintext on disk; only contents are encrypted.',
     setting_auto_lock: 'Auto-lock (minutes)',
     setting_auto_lock_desc: 'Lock automatically after this idle period (default 15 minutes). Moving to the background for more than 60 seconds also locks immediately and clears keys and revealed plaintext from memory.',
     setting_bg_lock: 'Blur lock countdown',
@@ -536,6 +607,81 @@ function normalizeBackgroundSeconds(value) {
   return BACKGROUND_LOCK_CHOICES.indexOf(seconds) >= 0 ? seconds : DEFAULT_BACKGROUND_LOCK_SECONDS;
 }
 
+// 文件系统路径归一化：去掉空段与 . / ..，统一正斜杠
+function normalizeRelativePath(rawValue) {
+  return String(rawValue == null ? '' : rawValue)
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((part) => part && part !== '.' && part !== '..')
+    .join('/');
+}
+
+function normalizeVaultDir(rawValue) {
+  const dir = normalizeRelativePath(rawValue);
+  return dir || DEFAULT_VAULT_DIR;
+}
+
+function normalizeCollapsedGroups(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of value) {
+    const group = normalizeRelativePath(item).slice(0, GROUP_NAME_MAX);
+    if (!group || seen.has(group)) continue;
+    seen.add(group);
+    out.push(group);
+    if (out.length >= 200) break;
+  }
+  return out;
+}
+
+// 文件/分组名清洗：禁止路径分隔与系统保留字符，去掉首尾空白和结尾的点
+function sanitizePathSegment(value, maxLength) {
+  let text = String(value == null ? '' : value).normalize('NFC');
+  text = text.replace(/[\u0000-\u001f\u007f]/g, '');
+  text = text.replace(/[\\/:*?"<>|]/g, '-');
+  text = text.replace(/\s+/g, ' ').trim();
+  text = text.replace(/\.+$/g, '');
+  return text.slice(0, maxLength || FILE_NAME_MAX);
+}
+
+// 输入 "组/名字" 或 名称 + 分组：最后一段是文件名，前面都是分组；返回 null 表示非法
+function parseVaultFileInput(rawName, rawGroup) {
+  const nameText = String(rawName == null ? '' : rawName).trim();
+  const groupText = String(rawGroup == null ? '' : rawGroup).trim();
+  const combined = groupText ? groupText + '/' + nameText : nameText;
+  const parts = combined.split('/').filter((part) => part && part.trim());
+  if (!parts.length) return null;
+  const fileName = sanitizePathSegment(parts.pop().replace(/\.enc$/i, ''), FILE_NAME_MAX);
+  if (!fileName) return null;
+  const groupParts = [];
+  for (const part of parts) {
+    const clean = sanitizePathSegment(part, GROUP_NAME_MAX);
+    if (!clean) return null;
+    groupParts.push(clean);
+  }
+  return { name: fileName, group: groupParts.join('/') };
+}
+
+function fileMtimeText(mtime) {
+  const stamp = Number(mtime);
+  if (!stamp) return '';
+  const date = new Date(stamp);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (value) => String(value).padStart(2, '0');
+  return (
+    date.getFullYear() +
+    '-' +
+    pad(date.getMonth() + 1) +
+    '-' +
+    pad(date.getDate()) +
+    ' ' +
+    pad(date.getHours()) +
+    ':' +
+    pad(date.getMinutes())
+  );
+}
+
 // 单元格解转义：只还原 \| 与 \\，其它反斜杠序列保持原样
 function unescapeCellText(text) {
   const source = String(text == null ? '' : text);
@@ -679,6 +825,11 @@ class SecretVaultSettingTab extends PluginSettingTab {
         type: 'group',
         heading: t('setting_group_vault'),
         items: [
+          {
+            name: t('setting_vault_directory'),
+            desc: t('setting_vault_directory_desc'),
+            control: { type: 'text', key: 'vaultDir' },
+          },
           {
             name: t('setting_vault_path'),
             desc: t('setting_vault_path_desc'),
@@ -911,6 +1062,12 @@ class SecretVaultSettingTab extends PluginSettingTab {
     if (key === 'autoLockMinutes') this.plugin.resetIdleTimer();
     if (key === 'vaultPath') {
       this.plugin.vaultState = 'unknown';
+      this.plugin.refreshViews();
+    }
+    if (key === 'vaultDir') {
+      this.plugin.settings.vaultDir = normalizeVaultDir(this.plugin.settings.vaultDir);
+      await this.plugin.scanVaultFiles();
+      this.plugin.vaultState = this.plugin.vaultFiles.length ? 'present' : 'absent';
       this.plugin.refreshViews();
     }
   }
@@ -1258,7 +1415,106 @@ class SecretVaultView extends ItemView {
     else if (readOnly) this.renderConflictBanner(root);
 
     // 0.3.0 起界面只有笔记：条目列表与 CRUD 入口全部下线；0.3.1 起引用语法取消，entries 仅原样保留
-    this.renderNotes(root, readOnly);
+    const layout = root.createDiv({ cls: 'xsv-layout' });
+    this.renderFilePanel(layout);
+    const main = layout.createDiv({ cls: 'xsv-note-panel' });
+    this.renderNotes(main, readOnly);
+  }
+
+  renderFilePanel(layout) {
+    const panel = layout.createDiv({ cls: 'xsv-file-panel' });
+    const bar = panel.createDiv({ cls: 'xsv-file-panel-head' });
+    bar.createDiv({ cls: 'xsv-file-panel-title', text: this.plugin.t('files_title') });
+    const newButton = bar.createEl('button', {
+      cls: 'xsv-btn xsv-btn-small xsv-btn-primary',
+      text: this.plugin.t('btn_new_file'),
+    });
+    newButton.addEventListener('click', () => {
+      if (!this.plugin.isUnlocked()) return;
+      new FileFormModal(this.plugin.app, this.plugin, { mode: 'create' }).open();
+    });
+
+    if (this.plugin.fileLoading) {
+      panel.createDiv({ cls: 'xsv-hint xsv-file-loading', text: this.plugin.t('files_loading') });
+    }
+
+    const files = this.plugin.vaultFiles || [];
+    if (!files.length) {
+      panel.createDiv({ cls: 'xsv-hint', text: this.plugin.t('files_empty') });
+      return;
+    }
+    const current = this.plugin.normalizeVaultPath(this.plugin.getVaultPath());
+    const collapsed = new Set(normalizeCollapsedGroups(this.plugin.settings.collapsedGroups));
+    const groups = new Map();
+    for (const file of files) {
+      const key = file.group || GROUP_UNGROUPED;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(file);
+    }
+    const list = panel.createDiv({ cls: 'xsv-file-list' });
+    for (const [group, items] of groups) {
+      const isCollapsed = !!group && collapsed.has(group);
+      const header = list.createEl('button', {
+        cls: 'xsv-group-header' + (isCollapsed ? ' xsv-group-collapsed' : ''),
+        text:
+          (isCollapsed ? '▸ ' : '▾ ') +
+          (group || this.plugin.t('group_ungrouped')) +
+          ' · ' +
+          this.plugin.t('group_file_count', { count: items.length }),
+      });
+      header.addEventListener('click', () => {
+        if (!group) return;
+        void this.plugin.toggleGroupCollapsed(group);
+      });
+      if (isCollapsed) continue;
+      const groupBody = list.createDiv({ cls: 'xsv-group-body' });
+      for (const file of items) {
+        const active = file.path === current;
+        const row = groupBody.createDiv({
+          cls: 'xsv-file-item' + (active ? ' xsv-file-item-active' : ''),
+        });
+        const main = row.createDiv({ cls: 'xsv-file-item-main' });
+        main.createDiv({ cls: 'xsv-file-name', text: file.name });
+        const metaParts = [];
+        if (file.legacy) metaParts.push('xu-secrets.enc');
+        if (file.mtime) metaParts.push(this.plugin.t('file_mtime', { time: fileMtimeText(file.mtime) }));
+        if (metaParts.length) main.createDiv({ cls: 'xsv-file-meta', text: metaParts.join(' · ') });
+        row.addEventListener('click', () => {
+          if (row.classList && row.classList.contains('xsv-file-item-active')) return;
+          void this.plugin.switchVaultFile(file.path);
+        });
+        const actions = row.createDiv({ cls: 'xsv-file-actions' });
+        const renameButton = actions.createEl('button', {
+          cls: 'xsv-icon-btn',
+          text: '✎',
+          attr: { 'aria-label': this.plugin.t('btn_rename_file'), title: this.plugin.t('btn_rename_file') },
+        });
+        renameButton.addEventListener('click', (event) => {
+          if (event && event.stopPropagation) event.stopPropagation();
+          if (!this.plugin.isUnlocked()) return;
+          new FileFormModal(this.plugin.app, this.plugin, { mode: 'rename', file }).open();
+        });
+        const deleteButton = actions.createEl('button', {
+          cls: 'xsv-icon-btn',
+          text: '×',
+          attr: { 'aria-label': this.plugin.t('btn_delete_file'), title: this.plugin.t('btn_delete_file') },
+        });
+        deleteButton.addEventListener('click', (event) => {
+          if (event && event.stopPropagation) event.stopPropagation();
+          if (!this.plugin.isUnlocked()) return;
+          new ConfirmModal(
+            this.plugin.app,
+            this.plugin.t('confirm_delete_file', { name: file.name }),
+            this.plugin.t('confirm_delete_file', { name: file.name }),
+            this.plugin.t('btn_delete_file'),
+            this.plugin.t('btn_cancel'),
+            () => {
+              void this.plugin.deleteVaultFile(file.path);
+            }
+          ).open();
+        });
+      }
+    }
   }
 
   renderCopyReadonlyBanner(root) {
@@ -1322,8 +1578,8 @@ class SecretVaultView extends ItemView {
       });
     }
 
+    // 标题只由正文 Markdown 渲染一次；这里不再重复渲染页面头部标题
     const header = wrap.createDiv({ cls: 'xsv-note-header' });
-    header.createDiv({ cls: 'xsv-note-title', text: selected.title });
     if (!readOnly && !this.noteEditing) {
       const editButton = header.createEl('button', {
         cls: 'xsv-btn xsv-btn-small',
@@ -1372,8 +1628,8 @@ class SecretVaultView extends ItemView {
       '',
       '| 名称 | 账号 | 密码 | 网址 |',
       '| :--- | :--- | :--- | :--- |',
-      '| GitHub | me@example.com | p@ss\\|w0rd*_2026 | [github.com](https://github.com) |',
-      '| 阿里云 | ops@example.com | P@ss-W0rd_*2026 | [aliyun.com](https://console.aliyun.com) |',
+      '| GitHub | your-github-name | p@ss\\|w0rd*_2026 | [github.com](https://github.com) |',
+      '| 阿里云 | your-aliyun-id | P@ss-W0rd_*2026 | [aliyun.com](https://console.aliyun.com) |',
       '',
       '表格默认全部按原文显示。只有把列名加进「设置 → 列显示规则」并选「密文」，该列才会遮挡。',
     ].join('\n');
@@ -1397,7 +1653,14 @@ class SecretVaultView extends ItemView {
     const sampleActions = sampleChoice.createDiv({ cls: 'xsv-actions xsv-actions-start' });
     const applySample = (mode) => {
       const sample = this.buildSampleNote();
-      editor.value = mode === 'replace' ? sample : String(editor.value).replace(/\s+$/, '') + '\n\n' + sample;
+      const current = String(editor.value).replace(/\s+$/, '');
+      // 示例只插入一次：重复点击「追加」不再叠加第二份表格与说明行
+      if (mode === 'append' && current.indexOf(sample.trim()) >= 0) {
+        new Notice(this.plugin.t('notice_sample_exists'), 4000);
+        if (sampleChoice.style) sampleChoice.style.display = 'none';
+        return;
+      }
+      editor.value = mode === 'replace' ? sample : current + '\n\n' + sample;
       this.noteDraft = editor.value;
       if (sampleChoice.style) sampleChoice.style.display = 'none';
     };
@@ -1799,6 +2062,79 @@ class ConfirmModal extends Modal {
   }
 }
 
+/* 新建 / 重命名保险库文件：名称 + 已有分组下拉，或直接输入新分组 */
+class FileFormModal extends Modal {
+  constructor(app, plugin, options) {
+    super(app);
+    this.plugin = plugin;
+    this.options = options || {};
+  }
+
+  onOpen() {
+    const t = (key, params) => this.plugin.t(key, params);
+    const renaming = this.options.mode === 'rename';
+    const file = this.options.file || null;
+    this.titleEl.setText(t(renaming ? 'rename_file_title' : 'new_file_title'));
+    const body = this.contentEl.createDiv({ cls: 'xsv-file-form' });
+    body.createDiv({ cls: 'xsv-label', text: t('new_file_name') });
+    const nameInput = body.createEl('input', { cls: 'xsv-input', type: 'text' });
+    nameInput.value = file ? file.name : '';
+    body.createDiv({ cls: 'xsv-hint', text: t('new_file_name_hint') });
+    body.createDiv({ cls: 'xsv-label', text: t('new_file_group') });
+    const groupSelect = body.createEl('select', { cls: 'xsv-input' });
+    groupSelect.createEl('option', { value: '', text: t('group_ungrouped') });
+    const groups = this.plugin.getGroupOptions();
+    if (file && file.group && groups.indexOf(file.group) < 0) groups.push(file.group);
+    for (const group of groups) groupSelect.createEl('option', { value: group, text: group });
+    groupSelect.createEl('option', { value: '__new__', text: t('new_file_group_new') });
+    if (file && file.group) groupSelect.value = file.group;
+
+    const newGroupWrap = body.createDiv({ cls: 'xsv-file-new-group' });
+    newGroupWrap.style.display = 'none';
+    newGroupWrap.createDiv({ cls: 'xsv-label', text: t('new_file_group_name') });
+    const newGroupInput = newGroupWrap.createEl('input', { cls: 'xsv-input', type: 'text' });
+    groupSelect.addEventListener('change', () => {
+      newGroupWrap.style.display = groupSelect.value === '__new__' ? '' : 'none';
+    });
+
+    body.createDiv({ cls: 'xsv-hint xsv-file-plaintext-warn', text: t('new_file_plaintext_warn') });
+    const errorBox = body.createDiv({ cls: 'xsv-error' });
+    errorBox.style.display = 'none';
+    const actions = body.createDiv({ cls: 'xsv-modal-actions' });
+    const cancel = actions.createEl('button', { cls: 'xsv-btn', text: t('btn_cancel') });
+    cancel.addEventListener('click', () => this.close());
+    const submit = actions.createEl('button', {
+      cls: 'xsv-btn xsv-btn-primary',
+      text: t(renaming ? 'btn_save' : 'btn_new_file'),
+    });
+    submit.addEventListener('click', () => {
+      void (async () => {
+        const groupValue = groupSelect.value === '__new__' ? newGroupInput.value : groupSelect.value;
+        const result = renaming
+          ? await this.plugin.renameVaultFile(file.path, nameInput.value, groupValue)
+          : await this.plugin.createVaultFile(nameInput.value, groupValue);
+        if (result && result.ok) {
+          this.close();
+          return;
+        }
+        const reason = result && result.reason;
+        errorBox.style.display = '';
+        errorBox.setText(
+          reason === 'exists'
+            ? t('err_file_name_exists')
+            : reason === 'invalid'
+              ? t('err_file_name_invalid')
+              : t('err_file_name_invalid')
+        );
+      })();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* 主插件类                                                            */
 /* ------------------------------------------------------------------ */
@@ -1839,6 +2175,13 @@ class XUSecretVault extends Plugin {
   vaultSources = [];
   selectedVaultPath = '';
   v1UpgradeWarned = false;
+
+  // 多文件：列表、当前文件、每文件独立密钥/哈希/冲突状态
+  vaultFiles = [];
+  selectedFilePath = '';
+  fileSessions = new Map();
+  sessionPassword = '';
+  fileLoading = '';
 
   // 统一单调时钟：退避、空闲与后台计时都不受系统时间跳变影响
   nowMs() {
@@ -1960,6 +2303,10 @@ class XUSecretVault extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     if (this.settings.language !== 'en') this.settings.language = 'zh';
     this.settings.backgroundLockSeconds = normalizeBackgroundSeconds(this.settings.backgroundLockSeconds);
+    // 目录与界面偏好：只保留字符串/数组，不含任何笔记内容或密码
+    this.settings.vaultDir = normalizeVaultDir(this.settings.vaultDir);
+    this.settings.selectedFile = normalizeRelativePath(this.settings.selectedFile);
+    this.settings.collapsedGroups = normalizeCollapsedGroups(this.settings.collapsedGroups);
     // 只保留 { name, mode }；旧格式/脏数据自动归一化，绝不携带任何密码或笔记内容
     this.settings.columnRules = normalizeColumnRules(this.settings.columnRules);
     // 0.3.1 默认的 12 条预置规则不算用户自定义：升级到 0.3.2 时静默清空，回到全明文
@@ -2091,22 +2438,151 @@ class XUSecretVault extends Plugin {
     return path;
   }
 
+  getVaultDir() {
+    return normalizeVaultDir(this.settings.vaultDir);
+  }
+
+  defaultVaultFilePath() {
+    return this.normalizeVaultPath(this.getVaultDir() + '/' + DEFAULT_FILE_NAME + '.enc');
+  }
+
+  // 当前路径优先级：已解锁的当前文件 > 解锁前显式选的冲突副本 > 上次选中的文件 > 旧版默认路径
   getVaultPath() {
-    // 解锁前若用户显式选了冲突副本，读写都落到该文件；锁定后回到设置里的正式路径
+    if (this.selectedFilePath) return this.normalizeVaultPath(this.selectedFilePath);
     const selected = String(this.selectedVaultPath || '').trim();
-    return this.normalizeVaultPath(selected || this.settings.vaultPath);
+    if (selected) return this.normalizeVaultPath(selected);
+    if (this.settings.selectedFile) return this.normalizeVaultPath(this.settings.selectedFile);
+    return this.normalizeVaultPath(this.settings.vaultPath);
   }
 
-  // 当前会话是否正在查看冲突副本：此时一律只读，任何写操作都不能落到副本上
-  // （锁定后 selectedVaultPath 会复位，从而自动回到正式库的可写状态）
+  // 冲突副本一律只读；正式文件（含旧版 xu-secrets.enc）可写
   isReadOnlyCopy() {
-    return this.getVaultPath() !== this.normalizeVaultPath(this.settings.vaultPath);
+    return CONFLICT_COPY_RE.test(this.getVaultPath());
   }
 
-  // 解锁前枚举候选库文件：正式库 + 同 stem 的 conflict 副本，交给用户显式选择
+  // 把当前内存态（密钥、哈希、冲突标记）存回该文件的独立记录
+  rememberCurrentFileSession() {
+    if (!this.selectedFilePath || !this.sessionKey || !this.sessionSalt) return;
+    const saltBase64 = bytesToBase64(this.sessionSalt);
+    this.fileSessions.set(this.normalizeVaultPath(this.selectedFilePath), {
+      key: this.sessionKey,
+      salt: this.sessionSalt,
+      saltBase64,
+      iterations: this.sessionIterations,
+      hash: this.knownBlobHash,
+      conflictPending: this.conflictPending,
+      conflictPath: this.conflictPath,
+    });
+  }
+
+  // 递归扫描保险库目录下所有 .enc（含子目录），外加旧版 <vault>/xu-secrets.enc
+  async scanVaultFiles() {
+    const adapter = this.app.vault.adapter;
+    const dir = this.getVaultDir();
+    const files = [];
+    const seen = new Set();
+    const walk = async (relativeDir) => {
+      let listed = null;
+      try {
+        listed = await adapter.list(relativeDir);
+      } catch (error) {
+        return;
+      }
+      if (!listed) return;
+      const filePaths = Array.isArray(listed.files) ? listed.files : [];
+      for (const filePath of filePaths) {
+        const full = normalizeRelativePath(filePath);
+        if (!full || seen.has(full)) continue;
+        const base = full.slice(full.lastIndexOf('/') + 1);
+        if (!/\.enc$/i.test(base) || CONFLICT_COPY_RE.test(base) || /\.bak$/i.test(base)) continue;
+        if (/\.tmp-[0-9]{8}-[0-9]{6}-[A-Za-z0-9]{1,8}$/.test(base)) continue;
+        let mtime = 0;
+        try {
+          const stat = typeof adapter.stat === 'function' ? await adapter.stat(full) : null;
+          mtime = stat && typeof stat.mtime === 'number' ? stat.mtime : stat && stat.mtime ? new Date(stat.mtime).getTime() : 0;
+        } catch (error) {
+          mtime = 0;
+        }
+        const parent = full.slice(0, Math.max(0, full.lastIndexOf('/')));
+        let group = '';
+        if (parent === dir) group = '';
+        else if (parent.indexOf(dir + '/') === 0) group = parent.slice(dir.length + 1);
+        else group = parent;
+        seen.add(full);
+        files.push({
+          path: full,
+          name: base.replace(/\.enc$/i, ''),
+          group,
+          mtime,
+          legacy: full === this.normalizeVaultPath(this.settings.vaultPath) && parent !== dir,
+        });
+      }
+      const folders = Array.isArray(listed.folders) ? listed.folders : [];
+      for (const folder of folders) {
+        await walk(normalizeRelativePath(folder));
+      }
+    };
+    await walk(dir);
+    // 旧版默认文件：在保险库目录之外，单独补进来，不迁移、不删除
+    const legacyPath = this.normalizeVaultPath(this.settings.vaultPath);
+    if (legacyPath && !seen.has(legacyPath)) {
+      let exists = false;
+      try {
+        exists = await adapter.exists(legacyPath);
+      } catch (error) {
+        exists = false;
+      }
+      if (exists) {
+        const base = legacyPath.slice(legacyPath.lastIndexOf('/') + 1).replace(/\.enc$/i, '');
+        let mtime = 0;
+        try {
+          const stat = typeof adapter.stat === 'function' ? await adapter.stat(legacyPath) : null;
+          mtime = stat && typeof stat.mtime === 'number' ? stat.mtime : 0;
+        } catch (error) {
+          mtime = 0;
+        }
+        seen.add(legacyPath);
+        files.push({ path: legacyPath, name: base, group: '', mtime, legacy: true });
+      }
+    }
+    // 分组在前（按名称），「未分组」放最后；组内按文件名排序
+    files.sort((left, right) => {
+      if (left.group !== right.group) {
+        if (!left.group) return 1;
+        if (!right.group) return -1;
+        return left.group.localeCompare(right.group, 'zh');
+      }
+      return left.name.localeCompare(right.name, 'zh');
+    });
+    this.vaultFiles = files;
+    // 默认文件：当前选中 > 上次选中 > 旧版文件 > 列表第一个
+    const existing = new Set(files.map((item) => item.path));
+    let chosen = '';
+    if (this.selectedFilePath && existing.has(this.normalizeVaultPath(this.selectedFilePath))) {
+      chosen = this.normalizeVaultPath(this.selectedFilePath);
+    } else if (this.settings.selectedFile && existing.has(this.normalizeVaultPath(this.settings.selectedFile))) {
+      chosen = this.normalizeVaultPath(this.settings.selectedFile);
+    } else if (existing.has(legacyPath)) {
+      chosen = legacyPath;
+    } else if (files.length) {
+      chosen = files[0].path;
+    }
+    this.settings.selectedFile = chosen || this.settings.selectedFile || '';
+    return files;
+  }
+
+  getGroupOptions() {
+    const groups = new Set();
+    for (const file of this.vaultFiles) {
+      if (file.group) groups.add(file.group);
+    }
+    return Array.from(groups).sort((left, right) => left.localeCompare(right, 'zh'));
+  }
+
+  // 解锁前枚举候选库文件：当前文件 + 同 stem 的 conflict 副本，交给用户显式选择
   async scanVaultSources() {
     const adapter = this.app.vault.adapter;
-    const canonical = this.normalizeVaultPath(this.settings.vaultPath);
+    const canonical = this.getVaultPath();
     let canonicalExists = false;
     try {
       canonicalExists = await adapter.exists(canonical);
@@ -2162,7 +2638,8 @@ class XUSecretVault extends Plugin {
 
   async detectVaultExists() {
     try {
-      this.vaultState = (await this.app.vault.adapter.exists(this.getVaultPath())) ? 'present' : 'absent';
+      const files = await this.scanVaultFiles();
+      this.vaultState = files.length ? 'present' : 'absent';
     } catch (error) {
       console.error('[' + PLUGIN_ID + '] detect vault failed:', error);
       // 读取异常不能当成"文件不存在"，否则会引导用户创建并覆盖同名旧库
@@ -2379,32 +2856,35 @@ class XUSecretVault extends Plugin {
   async cleanupStaleTempFiles() {
     const adapter = this.app.vault.adapter;
     if (typeof adapter.list !== 'function' || typeof adapter.remove !== 'function') return;
-    const path = this.getVaultPath();
-    const slash = path.lastIndexOf('/');
-    const dir = slash < 0 ? '' : path.slice(0, slash);
-    const base = slash < 0 ? path : path.slice(slash + 1);
-    let listed = null;
-    try {
-      listed = await adapter.list(dir);
-    } catch (error) {
-      return;
+    const dirs = new Set();
+    for (const file of this.vaultFiles) {
+      const slash = file.path.lastIndexOf('/');
+      dirs.add(slash < 0 ? '' : file.path.slice(0, slash));
     }
-    if (!listed || !Array.isArray(listed.files)) return;
-    const tempRe = new RegExp(
-      '^' + escapeRegExp(base) + '\\.tmp-([0-9]{8})-([0-9]{6})-([A-Za-z0-9]{1,8})$'
-    );
+    const current = this.getVaultPath();
+    const slash = current.lastIndexOf('/');
+    dirs.add(slash < 0 ? '' : current.slice(0, slash));
     const now = Date.now();
-    for (const file of listed.files) {
-      const name = String(file).slice(String(file).lastIndexOf('/') + 1);
-      const match = tempRe.exec(name);
-      if (!match) continue;
-      const createdAt = parseFileStamp(match[1], match[2]);
-      // 时间戳解析失败或不足 1 小时：可能是另一实例正在写，保留
-      if (!createdAt || now - createdAt < 3600000) continue;
+    for (const dir of dirs) {
+      let listed = null;
       try {
-        await adapter.remove(file);
+        listed = await adapter.list(dir);
       } catch (error) {
-        /* ignore */
+        continue;
+      }
+      if (!listed || !Array.isArray(listed.files)) continue;
+      for (const file of listed.files) {
+        const name = String(file).slice(String(file).lastIndexOf('/') + 1);
+        const match = /^(.*)\.tmp-([0-9]{8})-([0-9]{6})-([A-Za-z0-9]{1,8})$/.exec(name);
+        if (!match) continue;
+        const createdAt = parseFileStamp(match[2], match[3]);
+        // 时间戳解析失败或不足 1 小时：可能是另一实例正在写，保留
+        if (!createdAt || now - createdAt < 3600000) continue;
+        try {
+          await adapter.remove(file);
+        } catch (error) {
+          /* ignore */
+        }
       }
     }
   }
@@ -2662,6 +3142,7 @@ class XUSecretVault extends Plugin {
     if (!active()) return { written: false, discarded: true, unchanged: false, conflict: false };
     this.entries = nextEntries;
     if (kind === 'notes') this.notes = nextNotes;
+    this.rememberCurrentFileSession();
     return { written: true, discarded: false, unchanged: false, conflict: false };
   }
 
@@ -2684,6 +3165,7 @@ class XUSecretVault extends Plugin {
     }
     this.conflictPending = true;
     this.conflictPath = conflictPath;
+    this.rememberCurrentFileSession();
     // 明确告知：已另存副本、原文件未被覆盖；不更新 this.entries，避免继续基于旧快照编辑
     new Notice(this.t('notice_conflict_saved', { path: conflictPath }), 12000);
     this.refreshViews();
@@ -2726,6 +3208,350 @@ class XUSecretVault extends Plugin {
     }
   }
 
+  /* ---------------- 多文件与分组 ---------------- */
+
+  // 所有切换 / 新建 / 删除 / 重命名都进同一条串行链，避免与保存并发
+  enqueueWrite(job) {
+    const task = this.writeChain.then(job, job);
+    this.writeChain = task.then(
+      () => undefined,
+      () => undefined
+    );
+    return task;
+  }
+
+  resetViewNotes() {
+    try {
+      const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE) || [];
+      for (const leaf of leaves) {
+        const view = leaf && leaf.view;
+        if (!view) continue;
+        view.noteId = '';
+        view.noteEditing = false;
+        view.noteDraft = null;
+        view.revealedCells.clear();
+      }
+    } catch (error) {
+      /* ignore */
+    }
+  }
+
+  // 读取并切到指定文件；密钥按文件缓存，首次打开才付一次 KDF
+  async loadFileSession(path, generation) {
+    const target = this.normalizeVaultPath(path);
+    const text = await this.readVaultText(target);
+    const envelope = this.parseEnvelope(text);
+    const iterations = Number(envelope.kdf.iterations);
+    const saltBase64 = String(envelope.kdf.salt);
+    const salt = base64ToBytes(saltBase64);
+    const cached = this.fileSessions.get(target);
+    let key = null;
+    if (cached && cached.saltBase64 === saltBase64 && cached.iterations === iterations) {
+      key = cached.key;
+    } else {
+      if (!this.sessionPassword) {
+        const error = new Error(this.t('err_session_password_lost'));
+        error.code = 'xsv-need-password';
+        throw error;
+      }
+      key = await this.deriveKey(this.sessionPassword, salt, iterations);
+    }
+    // 解锁期间可能已经锁定：锁定后绝不把旧会话读出的内容写进内存
+    if (generation !== undefined && generation !== this.sessionGeneration) {
+      const discarded = new Error('discarded');
+      discarded.code = 'xsv-discarded';
+      throw discarded;
+    }
+    let data = null;
+    try {
+      data = await this.decryptEnvelope(envelope, key);
+    } catch (error) {
+      // 缓存的密钥可能因外部改密码而失效：只在有主密码时重派生一次，仍失败才报错
+      if (cached && this.sessionPassword) {
+        try {
+          key = await this.deriveKey(this.sessionPassword, salt, iterations);
+          data = await this.decryptEnvelope(envelope, key);
+        } catch (retryError) {
+          data = null;
+        } finally {
+          this.fileSessions.delete(target);
+        }
+      }
+      if (!data) {
+        // 密钥不匹配/文件损坏：明确提示，且绝不改动当前文件
+        const wrong = new Error(this.t('err_file_wrong_password'));
+        wrong.code = 'xsv-wrong-file-password';
+        throw wrong;
+      }
+    }
+    const payload = decodePayload(data);
+    if (!payload) throw new Error(this.t('err_vault_corrupt'));
+    this.rememberCurrentFileSession();
+    let notes = payload.notes.map((item, index) => normalizeStoredNote(item, 'note-' + index));
+    if (!notes.length) notes = [createDefaultNote()];
+    const hash = await this.hashText(text);
+    this.selectedFilePath = target;
+    this.selectedVaultPath = '';
+    this.sessionKey = key;
+    this.sessionSalt = salt;
+    this.sessionIterations = iterations;
+    this.entries = payload.entries.map((item, index) => normalizeStoredEntry(item, 'restored-' + index));
+    this.notes = notes;
+    this.contentVersion = payload.contentVersion;
+    this.knownBlobHash = hash;
+    this.conflictPending = !!(cached && cached.conflictPending);
+    this.conflictPath = cached && cached.conflictPath ? cached.conflictPath : '';
+    this.settings.selectedFile = target;
+    this.fileSessions.set(target, {
+      key,
+      salt,
+      saltBase64,
+      iterations,
+      hash,
+      conflictPending: this.conflictPending,
+      conflictPath: this.conflictPath,
+    });
+    this.vaultState = 'present';
+    this.resetViewNotes();
+    this.resetIdleTimer();
+    return true;
+  }
+
+  async switchVaultFile(path) {
+    if (!this.isUnlocked()) return false;
+    const target = this.normalizeVaultPath(path);
+    if (this.selectedFilePath && target === this.normalizeVaultPath(this.selectedFilePath)) return true;
+    this.fileLoading = target;
+    this.refreshViews();
+    const generation = this.sessionGeneration;
+    try {
+      const result = await this.enqueueWrite(async () => {
+        if (!this.isUnlocked() || this.suspended) return false;
+        try {
+          return await this.loadFileSession(target, generation);
+        } catch (error) {
+          if (error && error.code === 'xsv-discarded') return false;
+          console.error('[' + PLUGIN_ID + '] switch file failed:', error);
+          new Notice(this.t('err_file_wrong_password'), 6000);
+          return false;
+        }
+      });
+      return !!result;
+    } finally {
+      this.fileLoading = '';
+      await this.scanVaultFiles();
+      this.refreshViews();
+      try {
+        await this.saveSettings();
+      } catch (error) {
+        /* 偏好保存失败不影响使用 */
+      }
+    }
+  }
+
+  // 新建文件：名称可含 组/名字；用当前会话主密码派生该文件自己的密钥
+  async createVaultFile(rawName, rawGroup) {
+    if (!this.isUnlocked()) {
+      new Notice(this.t('notice_unlock_first'), 3000);
+      return { ok: false, reason: 'locked' };
+    }
+    const parsed = parseVaultFileInput(rawName, rawGroup);
+    if (!parsed) {
+      new Notice(this.t('err_file_name_invalid'), 4000);
+      return { ok: false, reason: 'invalid' };
+    }
+    const dir = this.getVaultDir();
+    const target = this.normalizeVaultPath(
+      [dir, parsed.group, parsed.name + '.enc'].filter(Boolean).join('/')
+    );
+    if (await this.app.vault.adapter.exists(target)) {
+      new Notice(this.t('err_file_name_exists'), 4000);
+      return { ok: false, reason: 'exists' };
+    }
+    const generation = this.sessionGeneration;
+    const password = this.sessionPassword;
+    if (!password) {
+      new Notice(this.t('err_session_password_lost'), 4000);
+      return { ok: false, reason: 'no-password' };
+    }
+    const result = await this.enqueueWrite(async () => {
+      if (generation !== this.sessionGeneration || !this.sessionKey || this.suspended) {
+        return { ok: false, reason: 'discarded' };
+      }
+      if (await this.app.vault.adapter.exists(target)) return { ok: false, reason: 'exists' };
+      const cryptoObj = this.requireCrypto();
+      const salt = randomBytes(cryptoObj, SALT_BYTES);
+      const key = await this.deriveKey(password, salt, KDF_ITERATIONS);
+      if (generation !== this.sessionGeneration || !this.sessionKey || this.suspended) {
+        return { ok: false, reason: 'discarded' };
+      }
+      const notes = [createDefaultNote()];
+      await this.writeEnvelope([], key, salt, KDF_ITERATIONS, target, true, {
+        generation,
+        mustNotExist: true,
+        notes,
+      });
+      // 新文件成为当前文件：旧文件状态先存回其独立记录
+      this.rememberCurrentFileSession();
+      this.selectedFilePath = target;
+      this.selectedVaultPath = '';
+      this.sessionKey = key;
+      this.sessionSalt = salt;
+      this.sessionIterations = KDF_ITERATIONS;
+      this.entries = [];
+      this.notes = notes;
+      this.contentVersion = CONTENT_VERSION;
+      this.knownBlobHash = await this.hashText(await this.readVaultText(target));
+      this.conflictPending = false;
+      this.conflictPath = '';
+      this.fileSessions.set(target, {
+        key,
+        salt,
+        saltBase64: bytesToBase64(salt),
+        iterations: KDF_ITERATIONS,
+        hash: this.knownBlobHash,
+        conflictPending: false,
+        conflictPath: '',
+      });
+      this.settings.selectedFile = target;
+      this.resetViewNotes();
+      this.resetIdleTimer();
+      return { ok: true, path: target, name: parsed.name, group: parsed.group };
+    });
+    await this.scanVaultFiles();
+    this.refreshViews();
+    if (result && result.ok) {
+      new Notice(this.t('notice_file_created', { name: parsed.name }), 3000);
+      try {
+        await this.saveSettings();
+      } catch (error) {
+        /* ignore */
+      }
+    } else if (result && result.reason === 'exists') {
+      new Notice(this.t('err_file_name_exists'), 4000);
+    }
+    return result || { ok: false, reason: 'failed' };
+  }
+
+  // 重命名 / 移动：同目录内改名或换分组，同名目标一律拒绝
+  async renameVaultFile(path, rawName, rawGroup) {
+    if (!this.isUnlocked()) return { ok: false, reason: 'locked' };
+    const parsed = parseVaultFileInput(rawName, rawGroup);
+    if (!parsed) {
+      new Notice(this.t('err_file_name_invalid'), 4000);
+      return { ok: false, reason: 'invalid' };
+    }
+    const from = this.normalizeVaultPath(path);
+    const dir = this.getVaultDir();
+    const to = this.normalizeVaultPath([dir, parsed.group, parsed.name + '.enc'].filter(Boolean).join('/'));
+    if (to === from) return { ok: true, path: from };
+    const adapter = this.app.vault.adapter;
+    const generation = this.sessionGeneration;
+    const result = await this.enqueueWrite(async () => {
+      if (generation !== this.sessionGeneration || !this.sessionKey) return { ok: false, reason: 'discarded' };
+      if (await adapter.exists(to)) return { ok: false, reason: 'exists' };
+      await this.ensureParentDir(to);
+      await adapter.rename(from, to);
+      const record = this.fileSessions.get(from);
+      if (record) {
+        this.fileSessions.delete(from);
+        this.fileSessions.set(to, record);
+      }
+      if (this.selectedFilePath && this.normalizeVaultPath(this.selectedFilePath) === from) {
+        this.selectedFilePath = to;
+        this.settings.selectedFile = to;
+      }
+      return { ok: true, path: to };
+    });
+    await this.scanVaultFiles();
+    this.refreshViews();
+    if (result && result.ok) {
+      new Notice(this.t('notice_file_renamed', { name: parsed.name }), 3000);
+      try {
+        await this.saveSettings();
+      } catch (error) {
+        /* ignore */
+      }
+    } else if (result && result.reason === 'exists') {
+      new Notice(this.t('err_file_name_exists'), 4000);
+    }
+    return result || { ok: false, reason: 'failed' };
+  }
+
+  async deleteVaultFile(path) {
+    if (!this.isUnlocked()) return { ok: false, reason: 'locked' };
+    const target = this.normalizeVaultPath(path);
+    const generation = this.sessionGeneration;
+    const isCurrent = this.selectedFilePath && this.normalizeVaultPath(this.selectedFilePath) === target;
+    const nextPath = isCurrent
+      ? (this.vaultFiles.filter((file) => file.path !== target)[0] || {}).path || ''
+      : '';
+    const result = await this.enqueueWrite(async () => {
+      if (generation !== this.sessionGeneration || !this.sessionKey) return { ok: false, reason: 'discarded' };
+      try {
+        await this.app.vault.adapter.remove(target);
+      } catch (error) {
+        return { ok: false, reason: 'failed' };
+      }
+      this.fileSessions.delete(target);
+      if (isCurrent) {
+        this.selectedFilePath = '';
+        this.settings.selectedFile = '';
+        this.sessionKey = null;
+        this.sessionSalt = null;
+        this.entries = [];
+        this.notes = [];
+        this.knownBlobHash = null;
+        this.conflictPending = false;
+        this.conflictPath = '';
+        if (nextPath && (await this.app.vault.adapter.exists(nextPath))) {
+          try {
+            await this.loadFileSession(nextPath);
+          } catch (error) {
+            this.sessionKey = null;
+          }
+        }
+      }
+      return { ok: true };
+    });
+    await this.scanVaultFiles();
+    this.vaultState = this.vaultFiles.length ? 'present' : 'absent';
+    if (result && result.ok) {
+      new Notice(this.t('notice_file_deleted'), 3000);
+      if (!this.isUnlocked()) {
+        this.lock();
+        return result;
+      }
+      this.refreshViews();
+      try {
+        await this.saveSettings();
+      } catch (error) {
+        /* ignore */
+      }
+    }
+    return result || { ok: false, reason: 'failed' };
+  }
+
+  async setVaultDir(rawDir) {
+    this.settings.vaultDir = normalizeVaultDir(rawDir);
+    await this.scanVaultFiles();
+    this.vaultState = this.vaultFiles.length ? 'present' : 'absent';
+    this.refreshViews();
+    await this.saveSettings();
+  }
+
+  async toggleGroupCollapsed(group) {
+    const key = normalizeRelativePath(group);
+    if (!key) return;
+    const collapsed = normalizeCollapsedGroups(this.settings.collapsedGroups);
+    const index = collapsed.indexOf(key);
+    if (index >= 0) collapsed.splice(index, 1);
+    else collapsed.push(key);
+    this.settings.collapsedGroups = collapsed;
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
   /* ---------------- 保险库生命周期 ---------------- */
 
   async createVault(password) {
@@ -2733,7 +3559,12 @@ class XUSecretVault extends Plugin {
     const normalized = normalizePassword(password);
     const salt = randomBytes(cryptoObj, SALT_BYTES);
     const key = await this.deriveKey(normalized, salt, KDF_ITERATIONS);
-    const path = this.normalizeVaultPath(this.settings.vaultPath);
+    // 首次创建落在新目录下的默认文件；旧版 <vault>/xu-secrets.enc 已存在时不会走到这里
+    const configured = this.normalizeVaultPath(this.settings.vaultPath);
+    const path =
+      configured && configured !== DEFAULT_VAULT_PATH
+        ? configured
+        : this.defaultVaultFilePath();
     this.selectedVaultPath = '';
     // 已存在同名文件时拒绝创建，避免覆盖旧库；writeEnvelope 在 rename 前还会再查一次，堵住 exists→rename 竞态
     if (await this.app.vault.adapter.exists(path)) throw new Error(this.t('err_vault_exists'));
@@ -2744,6 +3575,8 @@ class XUSecretVault extends Plugin {
       notes: initialNotes,
     });
     this.sessionGeneration += 1;
+    this.sessionPassword = normalized;
+    this.selectedFilePath = path;
     this.sessionKey = key;
     this.sessionSalt = salt;
     this.sessionIterations = KDF_ITERATIONS;
@@ -2753,11 +3586,23 @@ class XUSecretVault extends Plugin {
     this.vaultState = 'present';
     this.conflictPending = false;
     this.conflictPath = '';
+    this.knownBlobHash = await this.hashText(await this.readVaultText(path));
+    this.fileSessions.set(path, {
+      key,
+      salt,
+      saltBase64: bytesToBase64(salt),
+      iterations: KDF_ITERATIONS,
+      hash: this.knownBlobHash,
+      conflictPending: false,
+      conflictPath: '',
+    });
     this.reverifyChallenge = await this.buildReverifyChallenge(key, salt, KDF_ITERATIONS);
     this.failureCount = 0;
     this.blockedUntil = 0;
     this.settings.initializedPath = path;
+    this.settings.selectedFile = path;
     this.resetIdleTimer();
+    await this.scanVaultFiles();
     this.refreshViews();
     try {
       await this.saveSettings();
@@ -2820,7 +3665,8 @@ class XUSecretVault extends Plugin {
       const text = await this.readVaultText(path);
       const envelope = this.parseEnvelope(text);
       const iterations = Number(envelope.kdf.iterations);
-      const salt = base64ToBytes(envelope.kdf.salt);
+      const saltBase64 = String(envelope.kdf.salt);
+      const salt = base64ToBytes(saltBase64);
       const key = await this.deriveKey(password, salt, iterations);
       let data;
       try {
@@ -2839,6 +3685,8 @@ class XUSecretVault extends Plugin {
       this.failureCount = 0;
       this.blockedUntil = 0;
       this.sessionGeneration += 1;
+      this.sessionPassword = normalizePassword(password);
+      this.selectedFilePath = path;
       this.sessionKey = key;
       this.sessionSalt = salt;
       this.sessionIterations = iterations;
@@ -2852,12 +3700,25 @@ class XUSecretVault extends Plugin {
       this.hiddenAt = 0;
       this.hiddenAtWall = 0;
       this.knownBlobHash = await this.hashText(text);
+      this.fileSessions.set(path, {
+        key,
+        salt,
+        saltBase64: saltBase64,
+        iterations,
+        hash: this.knownBlobHash,
+        conflictPending: false,
+        conflictPath: '',
+      });
       this.reverifyChallenge = await this.buildReverifyChallenge(key, salt, iterations);
       this.conflictPending = false;
       this.conflictPath = '';
-      // 记录正式库路径（不用冲突副本路径），用于"文件缺失"判断
-      this.settings.initializedPath = this.normalizeVaultPath(this.settings.vaultPath);
+      // 记录当前文件路径（不用冲突副本路径），用于"文件缺失"判断
+      this.settings.initializedPath = this.normalizeVaultPath(path);
+      this.settings.selectedFile = this.normalizeVaultPath(path);
       this.resetIdleTimer();
+      await this.scanVaultFiles();
+      // 若解锁的是冲突副本，列表会把"上次文件"修正回正式库；缺失态判断也用修正后的路径
+      if (this.settings.selectedFile) this.settings.initializedPath = this.settings.selectedFile;
       this.refreshViews();
       // v1 兼容读取成功：提示并升级为 v2；升级失败不影响本次解锁
       if (Number(envelope.formatVersion) === LEGACY_FORMAT_VERSION) {
@@ -2973,6 +3834,13 @@ class XUSecretVault extends Plugin {
     this.conflictPath = '';
     this.selectedVaultPath = '';
     this.lastUnlockError = '';
+
+    // 多文件：清空所有文件的派生密钥、主密码暂存与列表快照，DOM 中不保留任何文件名/内容预览
+    this.fileSessions.clear();
+    this.sessionPassword = '';
+    this.selectedFilePath = '';
+    this.vaultFiles = [];
+    this.fileLoading = '';
 
     this.clearClipboardTimer();
     if (this.clipboardText) void this.clearClipboardIfOwned(false);

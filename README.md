@@ -3,16 +3,24 @@
 > [!NOTE]
 > **密钥保险库**：在本地加密保存密码、API 密钥与私钥。
 
-这是一个把敏感凭据集中存放在单个加密文件里的 Obsidian 桌面端插件。插件在当前主编辑区打开一个整页标签，首次使用时设置主密码；之后所有数据以整体加密的形式写入 `xu-secrets.enc`，明文只存在于内存与界面中，锁定后立即从内存清除。插件不发起任何网络请求，也不把主密码、派生密钥或明文写入 `data.json`、笔记或其它明文文件。
+这是一个把敏感凭据集中保存在**多个独立加密文件**里的 Obsidian 桌面端插件。插件在当前主编辑区打开一个整页标签，首次使用时设置主密码；之后每个文件各自以整体加密的形式写入 `<vault>/xu-secrets/<分组>/<名字>.enc`，明文只存在于内存与界面中，锁定后立即从内存清除。插件不发起任何网络请求，也不把主密码、派生密钥或明文写入 `data.json`、笔记或其它明文文件。
+
+> **文件名与分组名是明文可见的。** 文件系统里能看到 `xu-secrets/工作组/密码本.enc` 这样的路径，只有文件内容被加密。不透明文件名 + 加密索引列为二期能力，当前版本不做。
 
 > English description below for review purposes. / 以下为英文说明，用于过审。
 
-XU Secret Vault keeps passwords, API keys and private keys in a single locally encrypted file. It is a desktop-only plugin: it opens a full-page tab in the main editor area, asks for a master password on first use, then encrypts the whole payload as one blob and writes it to `xu-secrets.enc`. Plaintext exists only in memory and the UI, and is cleared as soon as the vault is locked. The plugin makes no network requests and never writes the master password, derived key or plaintext to `data.json`, notes or any plaintext file.
+XU Secret Vault keeps passwords, API keys and private keys in **multiple independent encrypted files**. It is a desktop-only plugin: it opens a full-page tab in the main editor area, asks for a master password on first use, then encrypts each file as one blob and writes it to `<vault>/xu-secrets/<group>/<name>.enc`. Plaintext exists only in memory and the UI, and is cleared as soon as the vault is locked. The plugin makes no network requests and never writes the master password, derived key or plaintext to `data.json`, notes or any plaintext file.
+
+> **File and group names are visible in plaintext.** The filesystem shows paths such as `xu-secrets/team/passwords.enc`; only the contents are encrypted. Opaque file names and an encrypted index are planned for phase 2.
 
 ## 功能特性
 
-- 单文件加密保险库：默认 `xu-secrets.enc`，路径可在设置中修改，非 `.enc` 后缀会自动补全。
-- PBKDF2-HMAC-SHA512（600,000 次）派生 AES-256-GCM 密钥，随机 16 字节盐与每次写盘随机 12 字节 IV。
+- 多文件加密保险库：默认目录 `<vault>/xu-secrets/`，可在设置中修改；一个 `.enc` 就是一个独立保险库文件，各自拥有独立 salt、IV、写盘哈希与写盘串行链。
+- 文件名 = 用户输入的名字（自动清洗非法字符、强制 `.enc` 后缀、拒绝重名）；可用 `组/名字` 层级，分组就是目录。
+- 兼容旧版：如果 `<vault>/xu-secrets.enc` 已存在，启动时作为默认文件加载，**不迁移、不删除**，并继续出现在文件列表里。
+- 左侧文件列表递归扫描目录下所有 `.enc`（含子目录），按分组折叠显示名称、分组与修改时间；点击切换当前文件，顶部可「新建文件」。新建后可选择已有分组或直接输入新分组，也可以不选（未分组）。
+- 同一会话内缓存每个文件已派生的密钥，切回已打开过的文件不重复 KDF；首次打开新文件会做一次 PBKDF2（约 0.25 秒）并显示 loading。文件若来自别的主密码，会提示「该文件不是用当前主密码加密」，保持当前文件不变、不清空会话、不覆盖目标文件。
+- PBKDF2-HMAC-SHA512（600,000 次）派生 AES-256-GCM 密钥，每个文件随机 16 字节盐与每次写盘随机 12 字节 IV。
 - 信封头参数（版本、KDF 算法、迭代数、盐）与加密算法一起参与 GCM 认证（AAD），篡改文件头或算法名会导致解密失败。
 - 会话密钥为 non-extractable CryptoKey，仅驻留内存；锁定、关闭插件或自动锁定后立即丢弃。
 - 界面只有笔记：整页标签中维护一篇加密笔记，可用 Markdown 手写账号表与说明，支持标题、列表、粗体、行内代码、管道表格、http/https 链接。
@@ -28,8 +36,12 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ### Features
 
-- A single encrypted vault file (default `xu-secrets.enc`, path configurable).
-- PBKDF2-HMAC-SHA512 (600,000 iterations) derives an AES-256-GCM key, with a random 16-byte salt and a fresh 12-byte IV on every write.
+- A multi-file encrypted vault: default directory `<vault>/xu-secrets/` (configurable). Each `.enc` file is an independent vault with its own salt, IV, write hash and write chain.
+- File names come from user input (illegal characters sanitized, `.enc` forced, duplicates rejected); `group/name` creates a subfolder.
+- Legacy compatibility: if `<vault>/xu-secrets.enc` exists it is loaded as the default file **without migration or deletion**, and stays in the file list.
+- The left file list recursively scans every `.enc` (including subfolders), groups them into collapsible folders and shows name, group and modified time. Click to switch; "New file" at the top. You can pick an existing group or type a new one, or leave it ungrouped.
+- Derived keys are cached per file for the session, so switching back to an opened file skips KDF; the first open of a new file costs one PBKDF2 (~0.25 s) with a loading hint. A file encrypted with a different master password is rejected with "not encrypted with the current master password", leaving the current file untouched and never overwriting it.
+- PBKDF2-HMAC-SHA512 (600,000 iterations) derives an AES-256-GCM key per file, with a random 16-byte salt and a fresh 12-byte IV on every write.
 - Envelope header parameters (version, KDF algorithm, iterations, salt) are authenticated together with the cipher algorithm as AES-GCM additional data, so header tampering breaks decryption.
 - The session key is a non-extractable CryptoKey kept only in memory and dropped on lock, unload or auto-lock.
 - The full UI is notes-only: one encrypted Markdown note per vault, with headings, lists, bold, inline code, pipe tables and http/https links.
@@ -42,6 +54,27 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - The envelope format is now v2 with v1 compatibility reads: legacy envelopes are decrypted, announced and upgraded to v2 automatically; unknown versions report "unsupported version" instead of a password error.
 - Repeated unlock failures use exponential backoff capped at 30 seconds, kept in memory only.
 - UI language: Chinese (default) and English.
+
+## 多文件与分组
+
+0.4.0 起一个 `.enc` 就是一个独立保险库文件，内部仍是「一篇或多篇笔记」的结构。
+
+- **存储目录**：设置 → 密钥保险库 →「保险库目录」，相对 vault 根目录，默认 `xu-secrets/`。目录下的所有 `.enc`（含子目录）都会出现在左侧文件列表。
+- **文件命名**：文件名来自用户输入，自动清洗 `/ \ : * ? " < > |` 与控制字符、去掉结尾的点、强制补 `.enc`；同分组下重名会被拒绝并提示。
+- **分组**：分组就是目录，多级用 `/` 分隔；新建时可从下拉选已有分组、或输入新分组名，也可以不选（归到「未分组」）。列表按分组折叠，组内按名称排序，当前文件所在分组默认展开。折叠状态只作为界面偏好存进 `data.json`。
+- **重命名 / 移动**：文件行尾的 ✎ 可改名字或换分组，本质是移动目录；目标同名会被拒绝。× 删除文件需要二次确认。
+- **密钥隔离**：每个文件有自己的 salt、IV、写盘哈希和写盘串行链；切换文件时不会互相污染冲突检测状态。会话内缓存每个文件的派生密钥，切回已打开过的文件不重复 KDF；首次打开新文件会做一次 PBKDF2 并显示 loading。
+- **错误密码文件**：切换到一个用别的主密码加密的文件时提示「该文件不是用当前主密码加密」，当前文件保持不变、会话不清空，目标文件不会被覆盖。
+- **旧版兼容**：`<vault>/xu-secrets.enc` 若存在，启动时作为默认文件加载，**不迁移、不删除**，并继续显示在「未分组」里。
+- **明文边界**：文件名与分组名在文件系统中是明文可见的，只有内容加密；不透明文件名 + 加密索引列为二期。
+
+从「新建一个工作组」到「在里面写笔记」的完整点击路径：
+
+1. 解锁后，点击左侧文件面板顶部的「新建文件」；
+2. 在「文件名」输入 `密码本`，在「分组」下拉选「＋ 新建分组…」，在下方输入 `工作组`；
+3. 点「新建文件」→ 文件写入 `xu-secrets/工作组/密码本.enc` 并自动选中，当前区显示空笔记；
+4. 点「编辑笔记」→ 写内容（或点「插入示例表格」）→ 点「保存笔记」；
+5. 之后点左侧「工作组」下的「密码本」即可切回；切到别的文件再切回来，内容仍在。
 
 ## 笔记与表格
 
@@ -73,7 +106,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 > 上方表格仅说明规则；实际笔记里写 `P\|...` 时，竖线会作为单元格内容而不是列分隔符。
 
-示例表（可直接粘贴；密码列会按规则显示为掩码，点击眼睛可见）：
+示例表（可直接粘贴；默认全明文，密码列也按原样显示）：
 
 ```markdown
 # 我的密钥
@@ -82,8 +115,8 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 | 名称 | 账号 | 密码 | 网址 |
 | :--- | :--- | :--- | :--- |
-| GitHub | me@example.com | p@ss\|w0rd*_2026 | [github.com](https://github.com) |
-| 阿里云 | ops@example.com | P@ss-W0rd_*2026 | [aliyun.com](https://console.aliyun.com) |
+| GitHub | your-github-name | p@ss\|w0rd*_2026 | [github.com](https://github.com) |
+| 阿里云 | your-aliyun-id | P@ss-W0rd_*2026 | [aliyun.com](https://console.aliyun.com) |
 ```
 
 - 密码列含 `|`、`*`、`_`，其中竖线用 `\|` 转义；插入示例后渲染与复制都逐字一致。
@@ -173,7 +206,8 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 | 设置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | 界面语言 | 中文 | 切换中文 / English。 |
-| 保险库文件路径 | `xu-secrets.enc` | 相对 vault 根目录；必须以 `.enc` 结尾，缺失时自动补全。 |
+| 保险库目录 | `xu-secrets` | 相对 vault 根目录；目录下所有 `.enc`（含子目录）都会出现在文件列表。文件名与分组名明文可见，只有内容加密。 |
+| 旧版保险库文件路径 | `xu-secrets.enc` | 仅兼容 0.3.x；存在时作为默认文件加载，不迁移、不删除。 |
 | 自动锁定（分钟） | 15 | 无操作超过该时长后自动锁定并清除内存明文；切后台超过 60 秒也会锁定。 |
 | 失焦锁定倒计时 | 30 秒 | 失焦立即遮罩；可选立即 / 5 / 10 / 30 / 60 / 120 秒。倒计时内返回自动恢复，归零则锁定。 |
 | 列显示规则 | 空（全明文） | 只有手动设为「密文」的列才遮挡；用下拉切换明文/密文，支持增删与清空全部规则（二次确认）；改动立即生效。 |
@@ -224,9 +258,18 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 不做明文导出/另存为明文、不做主密码提示、不提供密码找回；这些是刻意的安全取舍。
 - 保险库文件被外部程序同时改写时，插件拒绝覆盖并生成 conflict 副本，不会自动合并；冲突后进入只读态，必须「重新加载」才能继续编辑，需要用户自行比对两份文件。
 - v1 兼容读取并升级为 v2 后，旧版插件将无法再读取该文件；升级前请先备份副本。
-- 备份方式就是复制 `xu-secrets.enc` 这个密文文件本身；不需要也不应该导出明文。恢复时把该文件放回原路径即可。
+- 备份方式就是复制 `xu-secrets/` 目录下的目标密文文件本身（旧版则是 `xu-secrets.enc`）；不需要也不应该导出明文。恢复时把对应文件放回原位即可。每个文件的 salt 独立，备份文件只能用加密它时的主密码解开。
 
 ## 版本记录
+
+### 0.4.0
+
+- 多保险库文件：一个 `.enc` 一个独立文件，默认目录 `xu-secrets/`，可配置；左侧文件列表递归扫描并按分组折叠，支持新建、切换、重命名/移动、删除。
+- 分组即子目录，支持 `组/名字` 与多级 `/`；新建时可从下拉选已有分组或输入新分组，也可不选（未分组）。
+- 每文件独立 salt/IV/写盘哈希/串行链；会话内按文件缓存派生密钥，首次打开新文件做一次 PBKDF2 并显示 loading；错误密码文件拒绝打开且不影响当前文件。
+- 兼容旧版 `<vault>/xu-secrets.enc`：启动作为默认文件加载，不迁移、不删除。
+- README 明确文件名与分组名明文可见，只有内容加密；不透明文件名 + 加密索引为二期。
+- 修复：页面头部与正文 H1 重复标题（只保留正文标题）；示例表格改用 `your-github-name` 等普通占位值，不再含 `{{...}}`；重复点「插入示例表格」不再叠加第二份表格与说明行。
 
 ### 0.3.3
 

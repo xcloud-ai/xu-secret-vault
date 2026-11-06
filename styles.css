@@ -490,3 +490,166 @@
   border-color: var(--text-error);
 }
 
+
+/* ---------------- 0.4.0 多文件与分组 ---------------- */
+.xsv-layout {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  min-height: 0;
+}
+
+.xsv-file-panel {
+  flex: 0 0 210px;
+  max-width: 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 10px;
+  border-right: 1px solid var(--background-modifier-border);
+  overflow-y: auto;
+}
+
+.xsv-file-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.xsv-file-panel-title {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.xsv-file-loading {
+  color: var(--text-accent);
+}
+
+.xsv-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.xsv-group-header {
+  appearance: none;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 2px;
+  text-align: left;
+  font-size: 0.78em;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.xsv-group-header:hover {
+  color: var(--text-normal);
+}
+
+.xsv-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 4px;
+}
+
+.xsv-file-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.xsv-file-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.xsv-file-item-active {
+  background: var(--background-modifier-active-hover);
+  box-shadow: inset 2px 0 0 var(--interactive-accent);
+}
+
+.xsv-file-item-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.xsv-file-name {
+  font-size: 0.86em;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xsv-file-meta {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xsv-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.xsv-icon-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 0 3px;
+  font-size: 0.82em;
+  line-height: 1.4;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.xsv-icon-btn:hover {
+  color: var(--text-normal);
+}
+
+.xsv-note-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xsv-file-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.xsv-file-form .xsv-input {
+  width: 100%;
+}
+
+.xsv-file-plaintext-warn {
+  color: var(--text-faint);
+}
+
+@media (max-width: 620px) {
+  .xsv-layout {
+    flex-direction: column;
+  }
+  .xsv-file-panel {
+    flex: 0 0 auto;
+    max-width: none;
+    padding-right: 0;
+    padding-bottom: 8px;
+    border-right: none;
+    border-bottom: 1px solid var(--background-modifier-border);
+  }
+  .xsv-file-item {
+    flex-wrap: wrap;
+  }
+}
