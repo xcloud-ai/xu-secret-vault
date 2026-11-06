@@ -284,3 +284,130 @@
   background: var(--background-primary);
 }
 
+/* 表格 / 笔记 模式切换 */
+.xsv-mode-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 2px;
+  background: var(--background-secondary);
+  border-radius: 8px;
+}
+
+.xsv-mode-tab {
+  flex: 1 1 auto;
+  padding: 4px 10px;
+  font-size: 0.84em;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.xsv-mode-tab-active {
+  color: var(--text-normal);
+  background: var(--background-primary);
+  border-color: var(--background-modifier-border);
+  font-weight: 600;
+}
+
+.xsv-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.xsv-note-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.xsv-note-tab {
+  padding: 2px 8px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.xsv-note-tab-active {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+
+.xsv-note-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xsv-note-title {
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--text-normal);
+  word-break: break-word;
+}
+
+.xsv-note-body {
+  font-size: 0.88em;
+  line-height: 1.55;
+  color: var(--text-normal);
+  word-break: break-word;
+}
+
+.xsv-note-editor {
+  width: 100%;
+  min-height: 220px;
+  box-sizing: border-box;
+  padding: 8px;
+  font-family: var(--font-monospace);
+  font-size: 0.86em;
+  line-height: 1.5;
+  color: var(--text-normal);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+.xsv-note-editor:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.xsv-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86em;
+}
+
+.xsv-md-table th,
+.xsv-md-table td {
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  word-break: break-word;
+}
+
+.xsv-md-table th {
+  font-weight: 600;
+  background: var(--background-secondary);
+}
+
+/* {{条目名.密码}} 引用：值不落到文本节点，只保留在闭包与插件内存 */
+.xsv-ref {
+  margin: 0 2px;
+}
+
+.xsv-ref-missing {
+  margin: 0 2px;
+  color: var(--text-faint);
+  font-size: 0.86em;
+}
+

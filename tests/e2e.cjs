@@ -1,4 +1,4 @@
-/* XU Secret Vault 0.1.4 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
+/* XU Secret Vault 0.1.5 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
 'use strict';
 
 const fs = require('fs');
@@ -106,6 +106,41 @@ async function buildLegacyV1Envelope(password, entries) {
   };
 }
 
+// 手工构造 v2 信封，但载荷只有 entries（没有 notes / contentVersion），用于验证旧结构兼容
+async function buildV2EnvelopeWithoutNotes(password, entries) {
+  const salt = webcrypto.getRandomValues(new Uint8Array(16));
+  const material = await subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password.normalize('NFC')),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveKey']
+  );
+  const key = await subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-512' },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const aad = new TextEncoder().encode(
+    ['xsv-aad-v2', 2, 'PBKDF2-SHA512', '600000', toBase64(salt), 'AES-256-GCM'].join('|')
+  );
+  const plaintext = JSON.stringify({ version: 2, entries });
+  const ciphertext = await subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: aad, tagLength: 128 },
+    key,
+    new TextEncoder().encode(plaintext)
+  );
+  return {
+    formatVersion: 2,
+    kdf: { algo: 'PBKDF2-SHA512', iterations: 600000, salt: toBase64(salt) },
+    cipher: { algo: 'AES-256-GCM', iv: toBase64(iv) },
+    payload: toBase64(ciphertext),
+  };
+}
+
 /* ---------------- 极简 DOM 桩 ---------------- */
 
 function makeEl(tag, options) {
@@ -122,6 +157,7 @@ function makeEl(tag, options) {
     autocomplete: '',
     spellcheck: true,
     attributes: {},
+    style: {},
     _classes: new Set(),
     _listeners: {},
   };
@@ -152,6 +188,9 @@ function makeEl(tag, options) {
   el.setText = (text) => {
     el.textContent = String(text);
     el.children = [];
+  };
+  el.appendText = (text) => {
+    el.textContent += String(text);
   };
   el.addClass = (name) => el._classes.add(name);
   el.removeClass = (name) => el._classes.delete(name);
@@ -220,9 +259,8 @@ let clipboard = '';
 let clipboardReadFailure = false;
 let writeBehavior = null; // null | 'throw-before' | 'throw-partial'
 let renameCorruptOnce = false; // 模拟 rename 后终检失败（用于测试 .bak 回滚）
-let rollbackWriteFailure = false; // 模拟回滚时恢复 tmp 写失败
-let armRollbackFailureOnce = false; // 首次 rename 成功后开启回滚写失败
-let removeFailure = false; // 模拟删除原文件失败（无 .bak 的回滚分支）
+let removeFailure = false; // 模拟删除原文件失败（回滚分支）
+let renameTargetFailureOnce = false; // 模拟 tmp 落位 rename 失败
 let afterReadHook = null; // 读取后注入外部改动（模拟 TOCTOU 窗口）
 let activePlugin = null;
 
@@ -241,9 +279,6 @@ const app = {
         return text;
       },
       write: async (filePath, text) => {
-        if (rollbackWriteFailure && String(filePath).indexOf('.tmp-') >= 0) {
-          throw new Error('simulated rollback write failure');
-        }
         if (writeBehavior === 'throw-before') throw new Error('simulated disk failure');
         if (writeBehavior === 'throw-partial') {
           // 模拟"写到一半"：先把截断内容落盘，再抛错
@@ -254,23 +289,21 @@ const app = {
       },
       rename: async (fromPath, toPath) => {
         if (!fileStore.has(fromPath)) throw new Error('rename source missing: ' + fromPath);
-        if (renameCorruptOnce) {
+        // 真实 Obsidian DataAdapter.rename：目标已存在时直接抛错，不会静默覆盖
+        if (fileStore.has(toPath)) throw new Error('Destination file already exists!');
+        if (renameCorruptOnce && toPath === VAULT_PATH) {
           renameCorruptOnce = false;
           // rename 成功但落盘内容损坏：触发 rename 后的终检失败与 .bak 回滚
           fileStore.set(toPath, 'CORRUPTED');
           fileStore.delete(fromPath);
-          if (armRollbackFailureOnce) {
-            armRollbackFailureOnce = false;
-            rollbackWriteFailure = true;
-          }
           return;
+        }
+        if (renameTargetFailureOnce && toPath === VAULT_PATH) {
+          renameTargetFailureOnce = false;
+          throw new Error('simulated rename failure');
         }
         fileStore.set(toPath, fileStore.get(fromPath));
         fileStore.delete(fromPath);
-        if (armRollbackFailureOnce) {
-          armRollbackFailureOnce = false;
-          rollbackWriteFailure = true;
-        }
       },
       remove: async (filePath) => {
         if (removeFailure && filePath === VAULT_PATH) throw new Error('simulated remove failure');
@@ -465,7 +498,7 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.1.4',
+    version: '0.2.0',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
@@ -583,6 +616,8 @@ try {
   const env1 = JSON.parse(fileStore.get(VAULT_PATH));
   ok(env1.cipher.iv !== env0.cipher.iv, '新增写盘生成了新的 IV');
   ok(env1.kdf.salt === env0.kdf.salt, '同一保险库盐保持不变');
+  ok(!fileStore.has(VAULT_PATH + '.bak'), '目标已存在时首次保存成功替换且不残留 .bak');
+  ok(tmpFiles().length === 0, '首次保存不残留 .tmp');
 
   // 3) 列表中默认不显示明文，点击「显示」后才出现
   ok(String(textOf(view.contentEl)).indexOf(SECRET_ONE) < 0, '列表中默认隐藏明文');
@@ -615,6 +650,7 @@ try {
   ok(plugin.entries[0].content === SECRET_TWO, '编辑后的内容已更新');
   const env2 = JSON.parse(fileStore.get(VAULT_PATH));
   ok(env2.cipher.iv !== env1.cipher.iv, '编辑写盘生成了新的 IV');
+  ok(!fileStore.has(VAULT_PATH + '.bak') && tmpFiles().length === 0, '连续保存不残留 .bak / .tmp');
   ok(String(fileStore.get(VAULT_PATH)).indexOf(SECRET_TWO) < 0, '负向：密文 blob 不含条目明文（编辑后）');
   ok(String(fileStore.get(VAULT_PATH)).indexOf(SECRET_ONE) < 0, '负向：密文 blob 不含旧明文');
 
@@ -919,8 +955,8 @@ try {
   writeBehavior = 'throw-partial';
   await rejects(
     plugin.addEntry({ name: 'Gamma', type: 'note', content: SECRET_THREE }),
-    'simulated partial write',
-    '负向：写盘中途报错时保存被拒绝'
+    '无法写入保险库文件',
+    '负向：写盘中途报错时保存被拒绝，且抛出中文文案'
   );
   writeBehavior = null;
   ok(plugin.entries.length === entriesBefore, '写盘失败后内存数据未更新');
@@ -955,16 +991,15 @@ try {
   // 14c) 回滚失败：保留 .bak，错误文案给出可恢复路径
   const beforeRollback = goodText();
   renameCorruptOnce = true;
-  armRollbackFailureOnce = true;
+  removeFailure = true;
   let rollbackError = null;
   try {
     await plugin.addEntry({ name: 'RollbackFail', type: 'note', content: SECRET_TWO });
   } catch (error) {
     rollbackError = error;
   }
-  rollbackWriteFailure = false;
+  removeFailure = false;
   renameCorruptOnce = false;
-  armRollbackFailureOnce = false;
   const bakPath = VAULT_PATH + '.bak';
   ok(rollbackError !== null, '回滚失败时写操作报错');
   ok(String(rollbackError && rollbackError.message).indexOf(bakPath) >= 0, '错误文案包含 .bak 恢复路径');
@@ -999,6 +1034,34 @@ try {
   plugin.lock();
   ok((await unlockFresh(MASTER)) === true, '恢复正式库后仍可解锁');
   ok(plugin.entries.length === entriesBefore, '恢复正式库后条目数量正确');
+
+  // 14f) createVault 的 mustNotExist：目标已存在时给中文提示，不暴露 adapter 英文原串
+  let existsError = null;
+  try {
+    await plugin.createVault(MASTER);
+  } catch (error) {
+    existsError = error;
+  }
+  ok(String(existsError && existsError.message) === plugin.t('err_vault_exists'), '创建时目标已存在给出中文提示');
+  ok(goodText() === beforeRollback, '创建被拒后旧库文件未被改动');
+
+  // 14e) tmp 落位 rename 失败：回滚把旧库从 .bak 改名回来，旧库仍可解锁且错误为中文
+  const beforeRenameFail = goodText();
+  renameTargetFailureOnce = true;
+  let renameError = null;
+  try {
+    await plugin.addEntry({ name: 'RenameFail', type: 'note', content: SECRET_TWO });
+  } catch (error) {
+    renameError = error;
+  }
+  renameTargetFailureOnce = false;
+  ok(renameError !== null, 'rename 落位失败时写操作报错');
+  ok(String(renameError && renameError.message) === plugin.t('err_save_failed'), '错误文案是中文 err_save_failed，不是 adapter 英文原串');
+  ok(goodText() === beforeRenameFail, 'rename 失败回滚后旧库字节不变');
+  ok(!fileStore.has(VAULT_PATH + '.bak'), '回滚成功后清理 .bak');
+  plugin.lock();
+  ok((await unlockFresh(MASTER)) === true, 'rename 失败回滚后旧库仍可解锁');
+  ok(plugin.entries.length === entriesBefore, 'rename 失败回滚后条目内容仍正确');
 
   // 15) 同步冲突：外部改动后拒绝覆盖，另存 conflict 副本（D-06 / S-02 / S-09）
   const hashBeforeConflict = plugin.knownBlobHash;
@@ -1224,7 +1287,217 @@ try {
   fileStore.delete(oldCopy);
   fileStore.delete(nestedCopy);
 
-  // 20) crypto.subtle 不可用时明确报错
+  // 20) 笔记 / 表格 / 链接（0.2.0）
+  plugin.lock();
+  restart();
+  // 20a) 旧数据（只有 entries，没有 notes / contentVersion）读取后自动补默认笔记
+  const noNotesEnvelope = await buildV2EnvelopeWithoutNotes(MASTER, [
+    {
+      id: 'legacy-note-1',
+      name: 'Legacy Note Entry',
+      type: 'note',
+      content: SECRET_THREE,
+      tags: [],
+      note: '',
+      createdAt: '',
+      updatedAt: '',
+    },
+  ]);
+  restoreVault(JSON.stringify(noNotesEnvelope, null, 2));
+  ok((await unlockFresh(MASTER)) === true, '旧结构（无 notes）信封可解锁');
+  ok(plugin.notes.length === 1, '旧结构读取后自动补一篇默认笔记');
+  ok(
+    plugin.notes[0].id === 'note-primary' && plugin.notes[0].title === '我的密钥',
+    '默认笔记 id 与标题符合约定'
+  );
+  ok(plugin.contentVersion === 1, '旧结构 contentVersion 缺省为兼容版本 1');
+
+  // 20b) 准备两个条目，供引用语法使用
+  await plugin.addEntry({ name: 'GitHub', type: 'password', content: SECRET_ONE, tags: [], note: '' });
+  await plugin.addEntry({ name: 'API Key', type: 'api-key', content: SECRET_TWO, tags: [], note: '' });
+  ok(plugin.entries.length === 3, '准备条目完成（旧条目 + 两个新条目）');
+
+  const NOTE_BODY_MARKER = 'NOTE-BODY-MARKER-9F3A';
+  const NOTE_SOURCE = [
+    '# 我的密钥',
+    '',
+    '段落：这是 **加粗** 与 `行内代码`，还有一个安全链接 [官网](https://example.com)。',
+    'HTML 原样显示：<script>alert(1)</script>',
+    '',
+    '## 账号表',
+    '',
+    '| 名称 | 账号 | 密码 |',
+    '| :--- | ---: | :---: |',
+    '| GitHub | {{GitHub.账号}} | {{GitHub.密码}} |',
+    '| 缺失 | {{Missing.密码}} | PLAIN-TABLE-VALUE |',
+    '',
+    '- 列表项一',
+    '- 列表项二',
+    '1. 有序一',
+    '2. 有序二',
+    '',
+    '危险链接：[危险](javascript:alert(1))',
+    '本地链接：[本地](file:///etc/passwd)',
+    '',
+    NOTE_BODY_MARKER,
+  ].join('\n');
+
+  ok((await plugin.saveNote('note-primary', NOTE_SOURCE)) !== undefined, '笔记保存调用成功');
+  ok(plugin.notes[0].body === NOTE_SOURCE, '保存后内存中的笔记体已更新');
+  ok(plugin.notes[0].updatedAt !== '', '保存后写入 updatedAt');
+
+  const notePayload = await plugin.decryptEnvelope(plugin.parseEnvelope(goodText()), plugin.sessionKey);
+  ok(notePayload.contentVersion === 2, '写盘载荷 contentVersion 升级为 2');
+  ok(Array.isArray(notePayload.notes) && notePayload.notes.length === 1, '密文中包含 notes 数组');
+  ok(notePayload.notes[0].body === NOTE_SOURCE, '笔记体完整写入密文');
+  ok(notePayload.entries.length === 3, '保存笔记不影响既有 entries');
+  const noteCipherText = goodText();
+  ok(noteCipherText.indexOf(NOTE_BODY_MARKER) < 0, '负向：密文不含笔记明文标记');
+  ok(noteCipherText.indexOf(SECRET_ONE) < 0 && noteCipherText.indexOf(SECRET_TWO) < 0, '负向：密文不含条目明文');
+
+  const mainSource = fs.readFileSync(MAIN, 'utf8');
+  ok(!/\.innerHTML\s*=/.test(mainSource), '负向：渲染代码不使用 innerHTML');
+  ok(mainSource.indexOf('insertAdjacentHTML') < 0, '负向：渲染代码不使用 insertAdjacentHTML');
+
+  // 20c) 视图：表格 / 笔记切换
+  view.render();
+  ok(!!findButton(view.contentEl, '表格') && !!findButton(view.contentEl, '笔记'), '顶部显示表格 / 笔记切换');
+  findButton(view.contentEl, '笔记').click();
+  ok(view.mode === 'notes', '点击「笔记」进入笔记模式');
+  ok(view.contentEl.querySelector('.xsv-notes') !== null, '渲染笔记布局');
+  ok(!!findButton(view.contentEl, '我的密钥'), '笔记列表显示默认笔记标题');
+  const noteText = textOf(view.contentEl);
+  ok(noteText.indexOf('NOTE-BODY-MARKER') >= 0, '笔记正文已渲染');
+  ok(noteText.indexOf('**加粗**') < 0 && noteText.indexOf('| 名称 |') < 0, '负向：渲染区不出现 Markdown 源码标记');
+
+  // 20d) 管道表格：真实 table、列对齐、单元格内容
+  const mdTables = findAll(view.contentEl, (el) => el.tagName === 'TABLE');
+  ok(mdTables.length === 1 && mdTables[0].hasClass('xsv-md-table'), '管道表格渲染为真实 table');
+  const headerCells = findAll(mdTables[0], (el) => el.tagName === 'TH');
+  ok(headerCells.length === 3, '表头为 3 列');
+  ok(
+    textOf(headerCells[0]).trim() === '名称' &&
+      textOf(headerCells[1]).trim() === '账号' &&
+      textOf(headerCells[2]).trim() === '密码',
+    '表头文本正确'
+  );
+  ok(headerCells[0].style.textAlign === 'left', '左对齐列按 :--- 对齐');
+  ok(headerCells[1].style.textAlign === 'right', '右对齐列按 ---: 对齐');
+  ok(headerCells[2].style.textAlign === 'center', '居中列按 :---: 对齐');
+  const bodyCells = findAll(mdTables[0], (el) => el.tagName === 'TD');
+  ok(bodyCells.length === 6, '两行数据渲染出 6 个单元格');
+  ok(
+    textOf(mdTables[0]).indexOf('PLAIN-TABLE-VALUE') >= 0,
+    '表格中的明文值照常显示'
+  );
+
+  // 20e) 引用语法：{name} / {name.密码} / {name.账号}
+  const refButtons = findAll(view.contentEl, (el) => el.tagName === 'BUTTON' && el.hasClass('xsv-ref'));
+  ok(refButtons.length === 2, '两个有效引用各渲染为掩码按钮');
+  ok(refButtons.every((el) => String(el.textContent).indexOf('••••••') === 0), '引用按钮只显示掩码，不含值');
+  ok(noteText.indexOf(SECRET_ONE) < 0, '负向：引用值不进入 DOM 文本');
+  clipboard = '';
+  refButtons[1].click();
+  ok(clipboard === SECRET_ONE, '点击 {{GitHub.密码}} 复制对应密码');
+  clipboard = '';
+  refButtons[0].click();
+  ok(clipboard === 'GitHub', '点击 {{GitHub.账号}} 复制条目的账号值');
+
+  const missingRefs = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-missing'));
+  ok(missingRefs.length === 1, '引用缺失渲染为独立提示');
+  ok(
+    textOf(missingRefs[0]).indexOf('引用缺失') >= 0 && textOf(missingRefs[0]).indexOf('Missing.密码') >= 0,
+    '引用缺失文案包含名称'
+  );
+
+  // 20f) 链接白名单：只有 http/https 可点击
+  const anchors = findAll(view.contentEl, (el) => el.tagName === 'A');
+  ok(anchors.length === 1, '负向：只有 http/https 链接生成可点击元素');
+  ok(anchors[0].getAttribute('href') === 'https://example.com', 'http/https 链接保留原地址');
+  ok(noteText.indexOf('javascript:alert(1)') >= 0, '负向：javascript: 链接按纯文本显示');
+  ok(noteText.indexOf('file:///etc/passwd') >= 0, '负向：file:// 链接按纯文本显示');
+  ok(
+    !findAll(view.contentEl, (el) => el.tagName === 'SCRIPT').length,
+    '负向：Markdown 中的脚本标签不会变成真实节点'
+  );
+
+  // 20g) 其它 Markdown 结构
+  ok(findAll(view.contentEl, (el) => el.tagName === 'H2').length === 1, '二级标题渲染为 h2');
+  ok(findAll(view.contentEl, (el) => el.tagName === 'STRONG').length >= 1, '粗体渲染为 strong');
+  ok(findAll(view.contentEl, (el) => el.tagName === 'CODE').length >= 1, '行内代码渲染为 code');
+  ok(findAll(view.contentEl, (el) => el.tagName === 'UL' && el.children.length === 2).length === 1, '无序列表两项');
+  ok(findAll(view.contentEl, (el) => el.tagName === 'OL' && el.children.length === 2).length === 1, '有序列表两项');
+
+  // 20h) 编辑态：等宽 textarea 直接写 Markdown，保存走原子写链路
+  const editNoteButton = findButton(view.contentEl, '编辑笔记');
+  ok(!!editNoteButton, '笔记模式提供编辑入口');
+  editNoteButton.click();
+  ok(view.noteEditing === true, '点击后进入编辑态');
+  const editor = findAll(view.contentEl, (el) => el.tagName === 'TEXTAREA')[0];
+  ok(!!editor && editor.hasClass('xsv-note-editor'), '编辑态使用等宽 textarea');
+  ok(editor.value === NOTE_SOURCE, 'textarea 显示完整 Markdown 源码');
+  editor.value = NOTE_SOURCE + '\n\n追加-EDIT-MARKER-2B7C';
+  editor.fire('input');
+  findButton(view.contentEl, '保存笔记').click();
+  await waitFor(() => plugin.notes[0].body.indexOf('追加-EDIT-MARKER-2B7C') >= 0, '保存笔记');
+  ok(view.noteEditing === false && view.noteDraft === null, '保存后退出编辑态并丢弃草稿');
+  ok(!findAll(view.contentEl, (el) => el.tagName === 'TEXTAREA').length, '保存后 textarea 已移除');
+  const editedPayload = await plugin.decryptEnvelope(plugin.parseEnvelope(goodText()), plugin.sessionKey);
+  ok(editedPayload.notes[0].body.indexOf('追加-EDIT-MARKER-2B7C') >= 0, '编辑后的笔记已加密落盘');
+  ok(goodText().indexOf('追加-EDIT-MARKER-2B7C') < 0, '负向：编辑后的密文不含笔记明文');
+
+  // 20i) 取消编辑不写盘
+  findButton(view.contentEl, '编辑笔记').click();
+  const cancelEditor = findAll(view.contentEl, (el) => el.tagName === 'TEXTAREA')[0];
+  cancelEditor.value = '取消-不应落盘-CANCEL-MARKER';
+  cancelEditor.fire('input');
+  findButton(view.contentEl, '取消编辑').click();
+  ok(view.noteEditing === false && view.noteDraft === null, '取消编辑后丢弃草稿');
+  ok(plugin.notes[0].body.indexOf('CANCEL-MARKER') < 0, '负向：取消编辑不改内存笔记');
+  ok(goodText().indexOf('CANCEL-MARKER') < 0, '负向：取消编辑不写盘');
+
+  // 20j) 锁定后笔记区、编辑器、列表与草稿全部清空
+  const noteTextBeforeLock = textOf(view.contentEl);
+  ok(noteTextBeforeLock.indexOf(NOTE_BODY_MARKER) >= 0, '锁定前笔记正文可见');
+  plugin.lock();
+  view.render();
+  const lockedText = textOf(view.contentEl);
+  ok(lockedText.indexOf(NOTE_BODY_MARKER) < 0, '锁定后笔记区无明文');
+  ok(lockedText.indexOf('追加-EDIT-MARKER-2B7C') < 0, '锁定后编辑内容无残留');
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-notes')).length, '锁定后笔记列表被移除');
+  ok(!findAll(view.contentEl, (el) => el.tagName === 'TEXTAREA').length, '锁定后编辑器被移除');
+  ok(view.noteDraft === null && view.noteEditing === false, '锁定后笔记草稿被丢弃');
+  ok(plugin.notes.length === 0, '锁定后内存中的 notes 被清空');
+
+  // 20k) 只读冲突副本：笔记只能看，保存被拒且文件字节不变
+  const canonicalNoteText = fileStore.get(VAULT_PATH);
+  ok((await plugin.unlock(MASTER)) === true, '重新解锁正式库');
+  const readOnlyCopy = VAULT_PATH.replace(/\.enc$/i, '') + '.conflict-20200103-000000.enc';
+  fileStore.set(readOnlyCopy, canonicalNoteText);
+  plugin.lock();
+  await plugin.scanVaultSources();
+  plugin.selectedVaultPath = readOnlyCopy;
+  ok((await plugin.unlock(MASTER)) === true, '只读副本可解锁');
+  view.mode = 'notes';
+  view.render();
+  ok(plugin.isReadOnlyCopy() === true, '查看副本时进入只读态');
+  ok(!findButton(view.contentEl, '编辑笔记'), '只读副本下不提供笔记编辑入口');
+  ok(String(textOf(view.contentEl)).indexOf('NOTE-BODY-MARKER') >= 0, '只读副本下笔记仍可查看');
+  const copyBytesBefore = fileStore.get(readOnlyCopy);
+  const canonicalBytesBefore = fileStore.get(VAULT_PATH);
+  await rejects(
+    plugin.saveNote(plugin.notes[0].id, '只读副本写入尝试'),
+    '只读',
+    '负向：只读副本下笔记保存被拒'
+  );
+  ok(fileStore.get(readOnlyCopy) === copyBytesBefore, '只读副本文件字节未变（笔记写入）');
+  ok(fileStore.get(VAULT_PATH) === canonicalBytesBefore, '正式库文件字节未变（笔记写入）');
+  plugin.lock();
+  await plugin.scanVaultSources();
+  fileStore.delete(readOnlyCopy);
+  ok(plugin.isReadOnlyCopy() === false && plugin.selectedVaultPath === '', '锁定后只读态复位');
+
+  // 21) crypto.subtle 不可用时明确报错
   plugin.lock();
   const savedCrypto = plugin.cryptoApi;
   plugin.cryptoApi = null;
