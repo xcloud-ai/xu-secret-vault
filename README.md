@@ -3,11 +3,11 @@
 > [!NOTE]
 > **密钥保险库**：在本地加密保存密码、API 密钥与私钥。
 
-这是一个把敏感凭据集中存放在单个加密文件里的 Obsidian 桌面端插件。插件打开一个侧边栏面板，首次使用时设置主密码；之后所有条目以整体加密的形式写入 `xu-secrets.enc`，明文只存在于内存与界面中，锁定后立即从内存清除。插件不发起任何网络请求，也不把主密码、派生密钥或明文写入 `data.json`、笔记或其它明文文件。
+这是一个把敏感凭据集中存放在单个加密文件里的 Obsidian 桌面端插件。插件在当前主编辑区打开一个整页标签，首次使用时设置主密码；之后所有数据以整体加密的形式写入 `xu-secrets.enc`，明文只存在于内存与界面中，锁定后立即从内存清除。插件不发起任何网络请求，也不把主密码、派生密钥或明文写入 `data.json`、笔记或其它明文文件。
 
 > English description below for review purposes. / 以下为英文说明，用于过审。
 
-XU Secret Vault keeps passwords, API keys and private keys in a single locally encrypted file. It is a desktop-only plugin: on first use it asks for a master password, then the whole entry set is encrypted as one blob and written to `xu-secrets.enc`. Plaintext exists only in memory and the UI, and is cleared as soon as the vault is locked. The plugin makes no network requests and never writes the master password, derived key or plaintext to `data.json`, notes or any plaintext file.
+XU Secret Vault keeps passwords, API keys and private keys in a single locally encrypted file. It is a desktop-only plugin: it opens a full-page tab in the main editor area, asks for a master password on first use, then encrypts the whole payload as one blob and writes it to `xu-secrets.enc`. Plaintext exists only in memory and the UI, and is cleared as soon as the vault is locked. The plugin makes no network requests and never writes the master password, derived key or plaintext to `data.json`, notes or any plaintext file.
 
 ## 功能特性
 
@@ -15,12 +15,10 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - PBKDF2-HMAC-SHA512（600,000 次）派生 AES-256-GCM 密钥，随机 16 字节盐与每次写盘随机 12 字节 IV。
 - 信封头参数（版本、KDF 算法、迭代数、盐）与加密算法一起参与 GCM 认证（AAD），篡改文件头或算法名会导致解密失败。
 - 会话密钥为 non-extractable CryptoKey，仅驻留内存；锁定、关闭插件或自动锁定后立即丢弃。
-- 列表默认只显示名称、类型与标签；内容需点击「显示」才出现在界面上，备注仅在编辑弹窗中可见；编辑弹窗的明文同样默认掩码。
-- 支持密码、API 密钥、私钥、备注四种条目类型，支持标签与搜索。
-- 新增/编辑使用弹窗；编辑写回前比对原值，无变化不写盘；删除需二次确认。
-- 复制到剪贴板后按设定秒数自动清空；若剪贴板已被替换则不会误删新内容。
-- 「表格 / 笔记」双视图：表格保留原有条目管理；笔记视图可用 Markdown 手写账号表与说明，支持标题、列表、粗体、行内代码、管道表格、http/https 链接，以及 `{{条目名.密码}}` 引用（点击引用即复制，沿用 30 秒剪贴板清空）。
-- 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦立即加遮罩并清屏，后台超过 60 秒直接锁定；锁定时清空面板明文、关闭正在编辑的弹窗、清空本插件复制的剪贴板内容并丢弃密钥。
+- 界面只有笔记：整页标签中维护一篇加密笔记，可用 Markdown 手写账号表与说明，支持标题、列表、粗体、行内代码、管道表格、http/https 链接。
+- 表格单元格即复制单元：点击任意非空单元格直接复制其文本（免选中），给出「已复制」轻量提示，沿用 30 秒剪贴板自动清空；单元格内容是链接时改为用系统浏览器打开，空单元格点击不做任何事。单元格文本始终可见，不做默认掩码。
+- `{{条目名.密码}}` 引用（点击引用即复制，沿用 30 秒剪贴板清空）；条目不存在时显示灰色「引用缺失」。0.3.0 起不再提供条目管理界面，但旧保险库里的 `entries` 继续被解析与保留，旧引用仍可只读使用。
+- 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦立即加遮罩并清屏，后台超过 60 秒直接锁定；锁定时清空整页明文、编辑区、草稿与复制缓存并丢弃密钥。
 - 写盘采用「写唯一 `.tmp` → 读回解密比对 → 留 `.bak` → rename 原子替换 → 终检 → 删 `.bak`」；任一步失败都保留或回滚旧文件，启动时清理本插件遗留的 `*.tmp*`。检测到文件被外部修改时拒绝覆盖，并另存 `*.conflict-时间戳.enc` 副本，冲突后必须先「重新加载」才能继续编辑。
 - 回到前台后的重新验证与解锁同等强度：重新付出完整 KDF 成本并解开会话挑战密文，不使用无盐哈希比对；连续错误复用同一套指数退避。
 - 信封格式升级为 v2，并保留 v1 兼容读取：旧信封解密成功后提示并自动升级为 v2；未知版本明确提示「版本不支持」，不会被误读成密码错误。
@@ -33,12 +31,10 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - PBKDF2-HMAC-SHA512 (600,000 iterations) derives an AES-256-GCM key, with a random 16-byte salt and a fresh 12-byte IV on every write.
 - Envelope header parameters (version, KDF algorithm, iterations, salt) are authenticated together with the cipher algorithm as AES-GCM additional data, so header tampering breaks decryption.
 - The session key is a non-extractable CryptoKey kept only in memory and dropped on lock, unload or auto-lock.
-- The list shows only name, type and tags; content appears only after clicking "Show", while the note is visible in the edit modal and entry content is masked by default there too.
-- Password, API key, private key and note entry types, with tags and search.
-- Add/edit via modal; unchanged edits are not written; deletion requires confirmation.
-- Clipboard is cleared automatically after a configurable delay, and only if it still holds the copied secret.
-- "Table / Notes" dual view: the table keeps the existing entry management; the notes view lets you write Markdown account tables and docs with headings, lists, bold, inline code, pipe tables, http/https links, and `{{entry.password}}` references (click a reference to copy it, using the same 30-second clipboard clearing).
-- Auto-lock after 15 minutes idle by default; backgrounding or losing window focus masks the panel immediately, and more than 60 seconds in the background locks it.
+- The full UI is notes-only: one encrypted Markdown note per vault, with headings, lists, bold, inline code, pipe tables and http/https links.
+- Every table cell is a copy unit: clicking a non-empty cell copies its text (no selection needed) with a lightweight "Copied" notice, reusing the 30-second clipboard clearing. If the cell is a link, the system browser opens instead; empty cells do nothing. Cell text stays visible (no default masking).
+- `{{entry.password}}` references (click a reference to copy it, using the same 30-second clipboard clearing); missing entries render as a grey "missing reference". Entry management UI was removed in 0.3.0, but legacy `entries` are still parsed and preserved, and old references remain readable.
+- Auto-lock after 15 minutes idle by default; backgrounding or losing window focus masks the full page immediately, and more than 60 seconds in the background locks it.
 - Writes use "write a unique .tmp, decrypt-verify, keep .bak, atomic rename, final verify, delete .bak"; any failure keeps or rolls back the old file, and stale `*.tmp*` files are cleaned at startup. External modifications are never overwritten and are saved as a `*.conflict-<timestamp>.enc` copy, which requires "Reload" before editing continues.
 - Re-verifying after returning to the foreground costs a full KDF derivation and decrypts an in-session challenge ciphertext; it never compares an unsalted hash, and repeated failures reuse the same exponential backoff.
 - The envelope format is now v2 with v1 compatibility reads: legacy envelopes are decrypted, announced and upgraded to v2 automatically; unknown versions report "unsupported version" instead of a password error.
@@ -47,11 +43,14 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ## 笔记与表格
 
-面板顶部可在「表格」与「笔记」之间切换。表格保留原有的条目管理；笔记视图像写 Markdown 笔记一样维护一张账号总表，正文整体随保险库一起加密落盘。
+0.3.0 起保险库只有笔记一种界面：面板顶部不再有「表格 / 笔记」切换，也不再有条目列表和新增 / 编辑 / 删除表单。整页标签里只有一篇加密笔记，正文整体随保险库一起加密落盘。
 
-- 笔记编辑：点击「编辑笔记」进入等宽 textarea，直接写 Markdown 源码，「保存笔记」走与条目相同的原子写链路。
-- 渲染范围：标题、段落、无序/有序列表、粗体、行内代码、管道表格、链接。表格的 `:---` / `---:` / `:---:` 会按列渲染为左/右/居中。
-- 链接：仅 `http`/`https` 可点击，点击后用系统浏览器打开；`javascript:`、`file://` 等其它 scheme 一律按纯文本显示。
+- 笔记编辑：点击「编辑笔记」进入等宽 textarea，直接写 Markdown 源码，「保存笔记」走与其它数据相同的原子写链路。
+- 渲染范围：标题、段落、无序/有序列表、粗体、行内代码、管道表格、链接。表格的 `:---` / `---:` / `:---:` 会按列渲染为左/右/居中；表格宽度自适应，过长时整页内容区提供横向滚动。
+- 单元格点击复制：表格中的**非空数据单元格**点击即复制该单元格文本，右下角弹出轻量「已复制」提示，并沿用 30 秒剪贴板自动清空。表头单元格不参与复制（点击无动作），空单元格点击也不复制、不提示。单元格文本保持可见，复制是免选中的便利，不是隐藏值。
+- 链接单元格：单元格内容整体是 `[文字](https://...)` 或裸 `http/https` URL 时，点击改用系统浏览器打开，不复制文本。
+- 剪贴板不可用时会明确提示「当前环境不支持剪贴板 API，无法自动复制」，不会静默失败。
+- 链接：仅 `http`/`https` 可点击；`javascript:`、`file://` 等其它 scheme 一律按纯文本显示。
 - 引用：`{{条目名}}` 取该条目的密码/内容，`{{条目名.密码}}` 取密码，`{{条目名.账号}}` 取条目名本身。引用渲染为掩码按钮，点击复制对应值，沿用 30 秒剪贴板清空；条目不存在时显示灰色「引用缺失: xxx」。
 - 安全提醒：表格里直接写明文账号密码也能显示，但**写引用更安全**——锁屏截图、误粘贴或分享屏幕时不会带出明文。引用值不会进入 DOM 文本，只在点击时写入剪贴板。
 
@@ -71,29 +70,28 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 备注：`仅限工作使用`
 ```
 
-先在「表格」里新增名为 `GitHub`、`阿里云` 的条目，再粘贴上面的内容到笔记编辑器保存即可。
+旧保险库里已有的 `GitHub`、`阿里云` 条目会继续被解析，上面的引用可以直接使用；但 0.3.0 不再提供新增条目入口，尚未创建的条目名会显示为「引用缺失」。
 
-### 笔记模式怎么进
+### 整页视图怎么打开
 
-1. 打开保险库面板并解锁。
-2. 面板顶部有两个切换按钮：左侧「▦ 表格」、右侧「✎ 笔记」。当前选中的按钮会高亮。
-3. 点「✎ 笔记」即可进入笔记模式。第一次切到空笔记时会出现一次性提示；笔记为空时页面会显示引导块和「插入示例表格」按钮。
-4. 点「插入示例表格」会把三列示例（名称 / 账号 / 密码）直接写进编辑器并进入编辑态，**不会自动保存**，确认后点「保存笔记」。
+1. 点击左侧功能区的锁图标，按 `Cmd/Ctrl+P` 执行「打开密钥保险库」，或在设置页点击「打开保险库」。
+2. 整页标签会在主编辑区打开：未解锁时是居中的解锁 / 创建卡片；已解锁时上半部分是笔记列表，下方是宽内容区。
+3. 已经打开过整页标签时，再次点击只会聚焦到同一个标签，不会重复新建面板。
+4. 笔记为空时会显示引导块和「插入示例表格」按钮；点它会写入三列示例并进入编辑态，**不会自动保存**，确认后点「保存笔记」。
 5. 如果当前笔记已有内容，再点「插入示例表格」会先让你选择「追加到末尾」或「替换全文」，不会静默插入第二份。
 
-### 引用名怎么对齐
+### 旧版侧栏与旧引用
 
-- 引用里的条目名必须与「表格」中的条目名完全一致：`{{GitHub.密码}}` 对应名称是 `GitHub` 的条目，写成 `GitHub ` 或 `github` 都会匹配失败。
+- 0.3.0 不再注册旧版侧栏视图类型；插件启动时会清理残留的旧侧栏实例，因此重载后不会出现「侧栏 + 整页」两个入口。
+- 旧版条目数据不会被删除：`entries` 仍完整保存在密文载荷里，笔记中的 `{{条目名.密码}}` 在条目存在时照常解析（只读使用）。
+- 0.2.1 的「引用缺失 → 点击创建条目」与「保存条目时提示这是笔记内容」随条目 UI 下线一并移除。
 - 笔记编辑态的下方会列出「可用条目名」（只显示名称，不含任何密码），可以直接对照拼写；条目超过 8 个时折叠为「共 N 个，展开查看」。
-- 渲染态里灰色的「引用缺失: xxx」可以点击；确认后会打开现有的新增条目表单并预填该名称（`.账号` / `.密码` 只取前面的条目名），用户取消则什么都不做，不会自动创建或写入。
-- 条目内容也走同一套 Markdown 渲染：把表格误粘到条目「内容」里时，点「显示」仍然能看到表格；但条目里不能引用自身，自引用会显示为灰色「引用缺失」并注明不能引用自身。
-- 保存条目时，如果内容里检测到管道表格或 `{{...}}` 引用，会提示一次「这段看起来是笔记内容，笔记模式里会渲染成表格」。同一会话只提示一次，不阻塞保存。
 
 ## 安装
 
 ### 方式一：从 Obsidian 社区目录安装
 
-当前版本 0.2.1 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
+当前版本 0.3.0 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
 
 ### 方式二：手动安装
 
@@ -112,11 +110,10 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 ### 基本流程
 
 1. 点击左侧功能区的锁图标，或按 `Cmd/Ctrl+P` 执行「打开密钥保险库」。
-2. 首次使用：在侧边栏输入两次主密码，点击「创建保险库」。主密码不会写入磁盘，忘记后无法恢复。
-3. 解锁后点击「新增」，填写名称、类型、标签、内容与备注并保存。
-4. 需要查看内容时点击条目上的「显示」；点击「复制」可复制内容，剪贴板会在设定秒数后自动清空。
-5. 点击「编辑」修改条目（内容默认掩码，点「显示」后才呈现）；点击「删除」并在确认弹窗中确认。
-6. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，后台超过 60 秒会自动锁定。
+2. 首次使用：在整页的居中卡片中输入两次主密码，点击「创建保险库」。主密码不会写入磁盘，忘记后无法恢复。
+3. 解锁后进入宽内容区：上方是笔记列表，下方是笔记渲染区。点击「编辑笔记」直接写 Markdown 账号表与说明，点击「保存笔记」落盘。
+4. 表格里每个非空单元格都能点击复制；单元格若是链接则改为打开浏览器。`{{条目名.密码}}` 引用点击复制，沿用 30 秒剪贴板自动清空。
+5. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，后台超过 60 秒会自动锁定。
 
 ### 首次使用
 
@@ -140,9 +137,8 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 | 命令 | ID | 说明 |
 | --- | --- | --- |
-| 打开密钥保险库 | `open-vault` | 打开或聚焦侧边栏面板。 |
+| 打开密钥保险库 | `open-vault` | 在主编辑区打开或聚焦整页面板。 |
 | 锁定保险库 | `lock-vault` | 立即锁定并清除内存中的密钥与明文。 |
-| 新增条目 | `new-entry` | 打开新增条目弹窗（需先解锁）。 |
 
 ## 安全说明
 
@@ -162,7 +158,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ### 锁定的实际动作
 
-触发锁定（手动、自动、命令、关闭面板或在后台超过 60 秒）时，插件会同步执行：丢弃 CryptoKey、内存中的条目集合与笔记正文、清空面板中所有已显形的明文与笔记渲染区/编辑器、关闭所有正在编辑的弹窗（弹窗内容与条目对象一并丢弃）、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。窗口失焦或切到后台时会先关闭所有本插件弹窗、加全屏遮罩并清屏，回到前台后必须重新输入主密码才能继续查看；遮罩期间所有命令入口、写入与复制一律拒绝。
+触发锁定（手动、自动、命令、关闭整页面板或在后台超过 60 秒）时，插件会同步执行：丢弃 CryptoKey、内存中的条目集合与笔记正文、清空整页中所有已渲染的明文与笔记编辑器/草稿、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。窗口失焦或切到后台时会先加全屏遮罩并清屏，回到前台后必须重新输入主密码才能继续查看；遮罩期间所有写入与复制一律拒绝。
 
 ### 明文可能残留的其他位置
 
@@ -184,6 +180,15 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 备份方式就是复制 `xu-secrets.enc` 这个密文文件本身；不需要也不应该导出明文。恢复时把该文件放回原路径即可。
 
 ## 版本记录
+
+### 0.3.0
+
+- 界面改为整页视图：锁图标与「打开密钥保险库」命令改为在主编辑区打开整页标签；未解锁时居中显示解锁 / 创建卡片，解锁后为宽内容区（笔记列表 + 渲染区），表格宽度自适应并支持横向滚动。
+- 整页视图单实例：已存在整页标签时只聚焦，不新建第二个面板；插件启动时清理旧版侧栏实例，且不再注册旧侧栏视图类型，重载后不会出现两个入口。
+- 移除「表格」面板：条目列表、时间线、新增 / 编辑 / 删除 / 显示入口及相关命令、Modal 全部下线，界面只剩笔记。
+- 旧数据兼容：`entries` 仍继续解析并保留在密文载荷里，笔记中的 `{{条目名.密码}}` 在条目存在时照常只读解析；未删除任何已有数据。
+- 笔记表格单元格即复制单元：点击非空数据单元格复制其文本并给出「已复制」轻量提示，沿用 30 秒剪贴板清空；单元格内容是链接时改为打开系统浏览器；空单元格不复制、不提示；表头单元格不参与复制。
+- 移除 0.2.1 的两条条目 UI 辅助功能：引用缺失点击创建条目、保存条目时的笔记内容提示。
 
 ### 0.2.1
 

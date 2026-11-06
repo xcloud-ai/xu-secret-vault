@@ -1,10 +1,11 @@
 /* XU Secret Vault — 本地加密密钥保险库（明文不落盘） */
 'use strict';
 
-const { ItemView, Modal, Notice, Plugin, PluginSettingTab, Setting } = require('obsidian');
+const { ItemView, Notice, Plugin, PluginSettingTab, Setting } = require('obsidian');
 
 const PLUGIN_ID = 'xu-secret-vault';
-const VIEW_TYPE = 'xu-secret-vault-view';
+const VIEW_TYPE = 'xu-secret-vault-page';
+const LEGACY_VIEW_TYPE = 'xu-secret-vault-view';
 const REPO_URL = 'https://github.com/xcloud-ai/xu-secret-vault';
 const DEFAULT_VAULT_PATH = 'xu-secrets.enc';
 const FORMAT_VERSION = 2;
@@ -39,10 +40,9 @@ const I18N = {
   zh: {
     cmd_open: '打开密钥保险库',
     cmd_lock: '锁定保险库',
-    cmd_add: '新增条目',
     view_title: '密钥保险库',
     subtitle_locked: '保险库已锁定',
-    subtitle_unlocked: '已解锁 · {count} 个条目',
+    subtitle_unlocked: '已解锁 · 笔记模式',
     setup_title: '创建主密码',
     setup_desc: '首次使用请设置主密码。主密码不会写入磁盘，只用于在本机派生加密密钥。请自行妥善保管，忘记后无法恢复数据。',
     unlock_desc: '输入主密码解锁保险库。解锁后明文只存在于内存与界面中。',
@@ -84,6 +84,7 @@ const I18N = {
     note_guide_desc: '笔记模式会像 Markdown 笔记一样渲染表格、链接与引用。点「插入示例表格」会把三列示例写进编辑器，不会自动保存。',
     notice_notes_mode_hint: '这里是笔记模式：可以像写 Markdown 一样维护账号表，保存后表格会渲染出来。',
     notice_note_content_hint: '这段看起来是笔记内容，笔记模式里会渲染成表格。',
+    notice_cell_copied: '已复制',
     note_empty: '这篇笔记还没有内容，点击「编辑笔记」开始写 Markdown。',
     note_editor_hint: '支持 Markdown：标题、列表、粗体、行内代码、管道表格、链接（仅 http/https）与 {{条目名.密码}} 引用。',
     err_note_missing: '笔记不存在或已被移除。',
@@ -128,6 +129,7 @@ const I18N = {
     err_vault_corrupt: '保险库文件格式无效，已中止读取。',
     err_write_verify: '写入校验失败：磁盘内容与预期不一致，未更新内存数据。',
     err_clipboard_unavailable: '当前环境不支持剪贴板 API，无法自动复制。',
+    err_view_open_failed: '无法打开整页视图，请稍后重试或重启 Obsidian。',
     err_generic: '操作失败：{msg}',
     setting_title: 'XU Secret Vault（密钥保险库）',
     setting_header_desc: '在本地加密保存密码、API 密钥与私钥；明文不写入任何笔记或明文文件。',
@@ -182,10 +184,9 @@ const I18N = {
   en: {
     cmd_open: 'Open secret vault',
     cmd_lock: 'Lock secret vault',
-    cmd_add: 'Add entry',
     view_title: 'Secret Vault',
     subtitle_locked: 'Vault is locked',
-    subtitle_unlocked: 'Unlocked · {count} entries',
+    subtitle_unlocked: 'Unlocked · notes mode',
     setup_title: 'Create master password',
     setup_desc: 'Set a master password on first use. It is never written to disk and is only used locally to derive the encryption key. Keep it safe: data cannot be recovered without it.',
     unlock_desc: 'Enter the master password to unlock. After unlocking, plaintext lives only in memory and the UI.',
@@ -227,6 +228,7 @@ const I18N = {
     note_guide_desc: 'Notes mode renders tables, links and references like a Markdown note. "Insert sample table" writes a three-column example into the editor and does not save automatically.',
     notice_notes_mode_hint: 'This is notes mode: maintain an account table like a Markdown note; tables render after saving.',
     notice_note_content_hint: 'This looks like note content; notes mode will render it as a table.',
+    notice_cell_copied: 'Copied',
     note_empty: 'This note is empty. Click "Edit note" to start writing Markdown.',
     note_editor_hint: 'Markdown support: headings, lists, bold, inline code, pipe tables, links (http/https only) and {{entry.password}} references.',
     err_note_missing: 'The note does not exist or has been removed.',
@@ -271,6 +273,7 @@ const I18N = {
     err_vault_corrupt: 'The vault file format is invalid. Reading aborted.',
     err_write_verify: 'Write verification failed: content on disk differs from what was written. In-memory data was not updated.',
     err_clipboard_unavailable: 'Clipboard API is unavailable in this environment.',
+    err_view_open_failed: 'Could not open the full-page view. Try again or restart Obsidian.',
     err_generic: 'Operation failed: {msg}',
     setting_title: 'XU Secret Vault',
     setting_header_desc: 'Encrypt passwords, API keys and private keys locally; plaintext is never written to notes or plaintext files.',
@@ -499,25 +502,6 @@ function decodePayload(data) {
   return null;
 }
 
-// 判断一段条目内容是否更像“笔记”：管道表格或 {{引用}}
-function looksLikeMarkdownNote(content) {
-  const text = String(content == null ? '' : content).replace(/\r\n?/g, '\n');
-  if (/\{\{[^{}\n]+\}\}/.test(text)) return true;
-  const lines = text.split('\n');
-  for (let i = 0; i + 1 < lines.length; i += 1) {
-    const header = lines[i].trim();
-    const separator = lines[i + 1].trim();
-    if (!header || !separator || header.indexOf('|') < 0 || separator.indexOf('|') < 0) continue;
-    const cells = separator
-      .replace(/^\|/, '')
-      .replace(/\|$/, '')
-      .split('|')
-      .map((cell) => cell.trim());
-    if (cells.length && cells.every((cell) => /^:?-{3,}:?$/.test(cell))) return true;
-  }
-  return false;
-}
-
 /* ------------------------------------------------------------------ */
 /* 设置页（1.13 声明式 Path A：仅 getSettingDefinitions，无 display）      */
 /* ------------------------------------------------------------------ */
@@ -630,23 +614,18 @@ class SecretVaultSettingTab extends PluginSettingTab {
 }
 
 /* ------------------------------------------------------------------ */
-/* 侧边栏视图                                                          */
+/* 整页视图                                                            */
 /* ------------------------------------------------------------------ */
 class SecretVaultView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
-    this.query = '';
-    this.revealed = new Set();
     this.uiError = '';
     this.detecting = false;
     this.masked = false;
-    this.mode = 'table';
     this.noteId = '';
     this.noteEditing = false;
     this.noteDraft = null;
-    this.noteEmptyHintShown = false;
-    this.pendingRefCreate = null;
   }
 
   getViewType() {
@@ -686,27 +665,21 @@ class SecretVaultView extends ItemView {
 
   // 锁定时同步清屏：立即移除已显形的明文，而不是只丢缓存
   clearSensitive() {
-    this.revealed.clear();
-    this.query = '';
     this.uiError = '';
     this.masked = false;
     // 笔记编辑草稿与渲染区一并丢弃，避免锁屏后仍能从视图或闭包里拿到明文
     this.noteEditing = false;
     this.noteDraft = null;
-    this.pendingRefCreate = null;
     if (this.contentEl) this.contentEl.empty();
   }
 
   // 切后台/失焦：立刻加遮罩并清屏，回到前台需重新验证主密码
   maskSensitive() {
     if (!this.plugin.isUnlocked()) return;
-    this.revealed.clear();
-    this.query = '';
     this.masked = true;
     // 挂起时同样丢弃笔记草稿，避免遮罩后仍残留明文副本
     this.noteEditing = false;
     this.noteDraft = null;
-    this.pendingRefCreate = null;
     if (this.contentEl) this.contentEl.empty();
     this.render();
   }
@@ -748,11 +721,10 @@ class SecretVaultView extends ItemView {
     const el = this.contentEl;
     el.empty();
     if (!this.plugin.isUnlocked()) {
-      this.revealed.clear();
       this.masked = false;
     }
 
-    const root = el.createDiv({ cls: 'xsv-view' });
+    const root = el.createDiv({ cls: 'xsv-view xsv-page' });
     if (!this.plugin.cryptoApi) {
       root.createDiv({ cls: 'xsv-title', text: this.plugin.t('view_title') });
       root.createDiv({ cls: 'xsv-error', text: this.plugin.t('err_crypto_unavailable') });
@@ -846,12 +818,13 @@ class SecretVaultView extends ItemView {
   }
 
   renderSetup(root) {
-    root.createDiv({ cls: 'xsv-title', text: this.plugin.t('setup_title') });
-    root.createDiv({ cls: 'xsv-desc', text: this.plugin.t('setup_desc') });
-    const password = this.createPasswordField(root, this.plugin.t('label_password'), () => submit());
-    const confirm = this.createPasswordField(root, this.plugin.t('label_confirm_password'), () => submit());
-    this.renderError(root);
-    const actions = root.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    const card = root.createDiv({ cls: 'xsv-page-card' });
+    card.createDiv({ cls: 'xsv-title', text: this.plugin.t('setup_title') });
+    card.createDiv({ cls: 'xsv-desc', text: this.plugin.t('setup_desc') });
+    const password = this.createPasswordField(card, this.plugin.t('label_password'), () => submit());
+    const confirm = this.createPasswordField(card, this.plugin.t('label_confirm_password'), () => submit());
+    this.renderError(card);
+    const actions = card.createDiv({ cls: 'xsv-actions xsv-actions-start' });
     const createButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('btn_create') });
 
     const submit = async () => {
@@ -880,17 +853,18 @@ class SecretVaultView extends ItemView {
     };
 
     createButton.addEventListener('click', () => void submit());
-    root.createDiv({ cls: 'xsv-hint', text: this.plugin.t('hint_locked_state') });
+    card.createDiv({ cls: 'xsv-hint', text: this.plugin.t('hint_locked_state') });
   }
 
   renderUnlock(root) {
-    this.renderHeader(root, this.plugin.t('subtitle_locked'));
-    root.createDiv({ cls: 'xsv-desc', text: this.plugin.t('unlock_desc') });
+    const card = root.createDiv({ cls: 'xsv-page-card' });
+    this.renderHeader(card, this.plugin.t('subtitle_locked'));
+    card.createDiv({ cls: 'xsv-desc', text: this.plugin.t('unlock_desc') });
     // 存在冲突副本时必须由用户显式选择，禁止自动挑选
-    if (this.plugin.vaultSources.length > 1) this.renderVaultSources(root);
-    const password = this.createPasswordField(root, this.plugin.t('label_password'), () => submit());
-    this.renderError(root);
-    const actions = root.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    if (this.plugin.vaultSources.length > 1) this.renderVaultSources(card);
+    const password = this.createPasswordField(card, this.plugin.t('label_password'), () => submit());
+    this.renderError(card);
+    const actions = card.createDiv({ cls: 'xsv-actions xsv-actions-start' });
     const unlockButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('btn_unlock') });
 
     const submit = async () => {
@@ -918,7 +892,7 @@ class SecretVaultView extends ItemView {
     };
 
     unlockButton.addEventListener('click', () => void submit());
-    root.createDiv({ cls: 'xsv-hint', text: this.plugin.t('hint_locked_state') });
+    card.createDiv({ cls: 'xsv-hint', text: this.plugin.t('hint_locked_state') });
   }
 
   renderVaultSources(root) {
@@ -940,7 +914,7 @@ class SecretVaultView extends ItemView {
   }
 
   renderUnlocked(root) {
-    const header = this.renderHeader(root, this.plugin.t('subtitle_unlocked', { count: this.plugin.entries.length }));
+    const header = this.renderHeader(root, this.plugin.t('subtitle_unlocked'));
     const lockButton = header.createEl('button', { cls: 'xsv-btn xsv-btn-small', text: this.plugin.t('btn_lock') });
     lockButton.addEventListener('click', () => this.plugin.lock());
 
@@ -951,85 +925,8 @@ class SecretVaultView extends ItemView {
     if (copyReadOnly) this.renderCopyReadonlyBanner(root);
     else if (readOnly) this.renderConflictBanner(root);
 
-    // 顶部模式切换：表格 / 笔记
-    const modeTabs = root.createDiv({ cls: 'xsv-mode-tabs' });
-    const tableTab = modeTabs.createEl('button', {
-      cls: 'xsv-mode-tab xsv-mode-tab-table' + (this.mode === 'table' ? ' xsv-mode-tab-active' : ''),
-      text: this.plugin.t('btn_mode_table'),
-    });
-    tableTab.addEventListener('click', () => {
-      if (this.mode === 'table') return;
-      this.mode = 'table';
-      this.noteEditing = false;
-      this.noteDraft = null;
-      this.pendingRefCreate = null;
-      this.render();
-    });
-    const notesTab = modeTabs.createEl('button', {
-      cls: 'xsv-mode-tab xsv-mode-tab-notes' + (this.mode === 'notes' ? ' xsv-mode-tab-active' : ''),
-      text: this.plugin.t('btn_mode_notes'),
-    });
-    notesTab.addEventListener('click', () => {
-      if (this.mode === 'notes') return;
-      this.mode = 'notes';
-      this.pendingRefCreate = null;
-      // 第一次切到空的笔记模式时给一次提示，避免用户以为入口失效
-      if (!this.noteEmptyHintShown) {
-        const selected = (this.plugin.notes || []).filter((note) => note.id === this.noteId)[0] || (this.plugin.notes || [])[0];
-        if (!selected || !String(selected.body || '').trim()) {
-          this.noteEmptyHintShown = true;
-          new Notice(this.plugin.t('notice_notes_mode_hint'), 6000);
-        }
-      }
-      this.render();
-    });
-
-    if (this.mode === 'notes') {
-      this.renderNotes(root, readOnly);
-      return;
-    }
-
-    root.createDiv({ cls: 'xsv-hint', text: this.plugin.t('hint_encrypted') });
-
-    const toolbar = root.createDiv({ cls: 'xsv-toolbar' });
-    const search = toolbar.createEl('input', { type: 'text', cls: 'xsv-input xsv-search' });
-    search.value = this.query;
-    search.setAttribute('placeholder', this.plugin.t('search_placeholder'));
-    search.addEventListener('input', () => {
-      this.query = search.value;
-      this.render();
-      globalThis.setTimeout(() => {
-        const next = this.contentEl.querySelector ? this.contentEl.querySelector('.xsv-search') : null;
-        if (next && typeof next.focus === 'function') {
-          next.focus();
-          try {
-            const end = next.value.length;
-            next.setSelectionRange(end, end);
-          } catch (error) {
-            /* ignore */
-          }
-        }
-      }, 0);
-    });
-
-    if (!readOnly) {
-      const addButton = toolbar.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('btn_add') });
-      addButton.addEventListener('click', () => this.openAddModal());
-    }
-
-    const needle = this.query.trim().toLowerCase();
-    const entries = this.plugin.entries.filter((entry) => {
-      if (!needle) return true;
-      const haystack = [entry.name, entry.type, entry.tags.join(' ')].join(' ').toLowerCase();
-      return haystack.indexOf(needle) >= 0;
-    });
-
-    const list = root.createDiv({ cls: 'xsv-list' });
-    if (!entries.length) {
-      list.createDiv({ cls: 'xsv-empty', text: this.plugin.t(this.query.trim() ? 'empty_search' : 'empty_entries') });
-      return;
-    }
-    for (const entry of entries) this.renderEntry(list, entry, readOnly);
+    // 0.3.0 起界面只有笔记：条目列表与 CRUD 入口全部下线，entries 仅作为引用数据源
+    this.renderNotes(root, readOnly);
   }
 
   renderCopyReadonlyBanner(root) {
@@ -1054,60 +951,6 @@ class SecretVaultView extends ItemView {
         const ok = await this.plugin.reloadFromConflict();
         new Notice(this.plugin.t(ok ? 'notice_reloaded' : 'notice_unlock_first'), 4000);
       })();
-    });
-  }
-
-  renderEntry(parent, entry, readOnly) {
-    const row = parent.createDiv({ cls: 'xsv-item' });
-    const head = row.createDiv({ cls: 'xsv-item-head' });
-    head.createDiv({ cls: 'xsv-item-name', text: entry.name });
-    head.createDiv({ cls: 'xsv-badge', text: this.plugin.typeLabel(entry.type) });
-    if (entry.tags.length) {
-      const tags = head.createDiv({ cls: 'xsv-tags' });
-      for (const tag of entry.tags) tags.createDiv({ cls: 'xsv-tag', text: tag });
-    }
-
-    const revealed = this.revealed.has(entry.id);
-    const contentWrap = row.createDiv({ cls: 'xsv-content-wrap' });
-    if (revealed) {
-      // 条目内容也走同一渲染器：表格、链接、引用掩码都生效；排除自引用避免递归
-      const contentEl = contentWrap.createDiv({ cls: 'xsv-content xsv-no-drag' });
-      this.renderMarkdown(contentEl, entry.content || '', { excludeName: entry.name });
-      contentEl.addEventListener('dragstart', (event) => {
-        if (event && typeof event.preventDefault === 'function') event.preventDefault();
-      });
-    } else {
-      contentWrap.createDiv({ cls: 'xsv-masked', text: '••••••••' });
-    }
-
-    const actions = row.createDiv({ cls: 'xsv-actions' });
-    const revealButton = actions.createEl('button', {
-      cls: 'xsv-btn xsv-btn-small',
-      text: this.plugin.t(revealed ? 'btn_hide_again' : 'btn_reveal'),
-    });
-    revealButton.addEventListener('click', () => {
-      if (revealed) this.revealed.delete(entry.id);
-      else this.revealed.add(entry.id);
-      this.render();
-    });
-
-    const copyButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-small', text: this.plugin.t('btn_copy') });
-    copyButton.addEventListener('click', () => void this.plugin.copySecret(entry.content));
-
-    // 冲突后禁止继续编辑，必须先「重新加载」
-    if (readOnly) return;
-
-    const editButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-small', text: this.plugin.t('btn_edit') });
-    editButton.addEventListener('click', () => {
-      new SecretEntryModal(this.app, this.plugin, entry).open();
-    });
-
-    const deleteButton = actions.createEl('button', {
-      cls: 'xsv-btn xsv-btn-small xsv-btn-danger',
-      text: this.plugin.t('btn_delete'),
-    });
-    deleteButton.addEventListener('click', () => {
-      new SecretDeleteModal(this.app, this.plugin, entry).open();
     });
   }
 
@@ -1142,7 +985,6 @@ class SecretVaultView extends ItemView {
         this.noteId = note.id;
         this.noteEditing = false;
         this.noteDraft = null;
-        this.pendingRefCreate = null;
         this.render();
       });
     }
@@ -1157,36 +999,6 @@ class SecretVaultView extends ItemView {
       editButton.addEventListener('click', () => {
         this.noteEditing = true;
         this.noteDraft = selected.body;
-        this.render();
-      });
-    }
-
-    // 点击「引用缺失」后的确认条：只提示，不自动创建
-    if (this.pendingRefCreate && !readOnly) {
-      const pending = this.pendingRefCreate;
-      const confirm = wrap.createDiv({ cls: 'xsv-ref-create-confirm' });
-      confirm.createDiv({
-        cls: 'xsv-desc',
-        text: this.plugin.t('note_ref_create_confirm', { name: pending.name }),
-      });
-      const confirmActions = confirm.createDiv({ cls: 'xsv-actions xsv-actions-start' });
-      const createButton = confirmActions.createEl('button', {
-        cls: 'xsv-btn xsv-btn-primary',
-        text: this.plugin.t('btn_create_entry'),
-      });
-      createButton.addEventListener('click', () => {
-        this.pendingRefCreate = null;
-        this.noteEditing = false;
-        this.noteDraft = null;
-        this.render();
-        new SecretEntryModal(this.app, this.plugin, null, { name: pending.name, type: 'password' }).open();
-      });
-      const cancelButton = confirmActions.createEl('button', {
-        cls: 'xsv-btn',
-        text: this.plugin.t('btn_cancel'),
-      });
-      cancelButton.addEventListener('click', () => {
-        this.pendingRefCreate = null;
         this.render();
       });
     }
@@ -1213,7 +1025,7 @@ class SecretVaultView extends ItemView {
       }
       return;
     }
-    this.renderMarkdown(body, selected.body, { allowCreateRefs: !readOnly });
+    this.renderMarkdown(body, selected.body);
   }
 
   // 示例表：优先用现有条目的真实名称，避免引用名称对不上
@@ -1459,7 +1271,8 @@ class SecretVaultView extends ItemView {
       if (right) return 'right';
       return 'left';
     });
-    const table = container.createEl('table', { cls: 'xsv-md-table' });
+    const tableWrap = container.createDiv({ cls: 'xsv-table-wrap' });
+    const table = tableWrap.createEl('table', { cls: 'xsv-md-table' });
     const thead = table.createEl('thead');
     const headRow = thead.createEl('tr');
     for (let col = 0; col < headerCells.length; col += 1) {
@@ -1473,9 +1286,35 @@ class SecretVaultView extends ItemView {
       const cells = this.splitPipeRow(lines[index]);
       const tr = tbody.createEl('tr');
       for (let col = 0; col < headerCells.length; col += 1) {
+        const rawCell = String(cells[col] || '').trim();
         const td = tr.createEl('td');
         if (alignments[col] && td.style) td.style.textAlign = alignments[col];
         this.renderInline(td, cells[col] || '', ctx);
+        // 单元格即复制单元：表头不参与，空单元格不注册点击
+        if (rawCell) {
+          td.addClass('xsv-cell-copy');
+          td.addEventListener('click', (event) => {
+            const target = event && event.target;
+            if (
+              target &&
+              typeof target.closest === 'function' &&
+              (target.closest('a') || target.closest('button'))
+            ) {
+              return;
+            }
+            // 单元格整体是链接：交给系统浏览器，不复制
+            const mdLink = /^\[[^\]]+\]\((https?:\/\/[^)\s]+)\)$/.exec(rawCell);
+            const bareUrl = /^https?:[\/]{2}[^\s]+$/i.test(rawCell) ? rawCell : '';
+            const url = mdLink ? mdLink[1] : bareUrl;
+            if (url) {
+              window.open(url, '_blank', 'noopener,noreferrer');
+              return;
+            }
+            void this.plugin.copySecret(rawCell).then((copied) => {
+              if (copied) new Notice(this.plugin.t('notice_cell_copied'), 2000);
+            });
+          });
+        }
       }
       index += 1;
     }
@@ -1546,25 +1385,9 @@ class SecretVaultView extends ItemView {
         return;
       }
       if (!resolved) {
-        const raw = ref[1].trim();
-        if (ctx && ctx.allowCreateRefs) {
-          const dot = raw.lastIndexOf('.');
-          const field = dot > 0 ? raw.slice(dot + 1) : '';
-          const base = field === '密码' || field === '账号' ? raw.slice(0, dot) : raw;
-          const missingButton = parent.createEl('button', {
-            cls: 'xsv-ref-missing xsv-ref-missing-action',
-            text: this.plugin.t('note_ref_missing', { name: raw }),
-          });
-          missingButton.setAttribute('title', this.plugin.t('note_ref_create_title'));
-          missingButton.addEventListener('click', () => {
-            this.pendingRefCreate = { name: base, field };
-            this.render();
-          });
-          return;
-        }
         parent.createSpan({
           cls: 'xsv-ref-missing',
-          text: this.plugin.t('note_ref_missing', { name: raw }),
+          text: this.plugin.t('note_ref_missing', { name: ref[1].trim() }),
         });
         return;
       }
@@ -1613,259 +1436,7 @@ class SecretVaultView extends ItemView {
     return null;
   }
 
-  openAddModal() {
-    if (!this.plugin.isUnlocked()) {
-      new Notice(this.plugin.t('notice_unlock_first'), 4000);
-      return;
-    }
-    // 遮罩/挂起期间一律拒绝进入编辑入口
-    if (this.plugin.suspended) {
-      new Notice(this.plugin.t('err_suspended'), 5000);
-      return;
-    }
-    if (this.plugin.conflictPending) {
-      new Notice(this.plugin.t('err_conflict_editing_blocked'), 6000);
-      return;
-    }
-    if (this.plugin.isReadOnlyCopy()) {
-      new Notice(this.plugin.t('err_conflict_copy_readonly'), 8000);
-      return;
-    }
-    new SecretEntryModal(this.app, this.plugin, null).open();
-  }
-}
 
-/* ------------------------------------------------------------------ */
-/* 新增 / 编辑弹窗                                                      */
-/* ------------------------------------------------------------------ */
-class SecretEntryModal extends Modal {
-  constructor(app, plugin, entry, prefill) {
-    super(app);
-    this.plugin = plugin;
-    this.entry = entry || null;
-    this.prefill = !entry && prefill ? prefill : null;
-    this.draftContent = entry ? entry.content : '';
-    this.contentRevealed = !entry;
-  }
-
-  onOpen() {
-    this.plugin.trackModal(this);
-    this.plugin.touchActivity();
-    const plugin = this.plugin;
-    const entry = this.entry;
-    const t = (key, vars) => plugin.t(key, vars);
-    this.titleEl.setText(t(entry ? 'title_edit_entry' : 'title_new_entry'));
-
-    const form = this.contentEl.createDiv({ cls: 'xsv-modal' });
-    const field = (label) => {
-      const wrap = form.createDiv({ cls: 'xsv-field' });
-      wrap.createDiv({ cls: 'xsv-label', text: label });
-      return wrap;
-    };
-    const bindActivity = (el) => {
-      el.addEventListener('input', () => plugin.touchActivity());
-      el.addEventListener('keydown', () => plugin.touchActivity());
-      el.addEventListener('change', () => plugin.touchActivity());
-    };
-    const harden = (el) => {
-      el.autocomplete = 'off';
-      el.spellcheck = false;
-      el.setAttribute('autocomplete', 'off');
-      el.setAttribute('spellcheck', 'false');
-      el.addEventListener('dragstart', (event) => {
-        if (event && typeof event.preventDefault === 'function') event.preventDefault();
-      });
-    };
-
-    const nameWrap = field(t('field_name'));
-    const nameInput = nameWrap.createEl('input', { type: 'text', cls: 'xsv-input' });
-    nameInput.value = entry ? entry.name : this.prefill ? this.prefill.name : '';
-    harden(nameInput);
-    bindActivity(nameInput);
-
-    const typeWrap = field(t('field_type'));
-    const typeSelect = typeWrap.createEl('select', { cls: 'xsv-input' });
-    for (const type of ENTRY_TYPES) {
-      const option = typeSelect.createEl('option', { text: plugin.typeLabel(type) });
-      option.value = type;
-    }
-    typeSelect.value = entry ? entry.type : this.prefill && this.prefill.type ? this.prefill.type : 'password';
-    bindActivity(typeSelect);
-
-    const tagsWrap = field(t('field_tags'));
-    const tagsInput = tagsWrap.createEl('input', { type: 'text', cls: 'xsv-input' });
-    tagsInput.value = entry ? entry.tags.join(', ') : '';
-    tagsInput.setAttribute('placeholder', t('tags_placeholder'));
-    harden(tagsInput);
-    bindActivity(tagsInput);
-
-    // 内容默认掩码，必须点「显示」才呈现；关闭弹窗即复位
-    const contentWrap = field(t('field_content'));
-    let contentInput = null;
-    const renderContentArea = () => {
-      contentWrap.empty();
-      if (this.contentRevealed) {
-        contentInput = contentWrap.createEl('textarea', { cls: 'xsv-input xsv-textarea' });
-        contentInput.rows = 6;
-        contentInput.value = this.draftContent;
-        contentInput.spellcheck = false;
-        contentInput.setAttribute('autocomplete', 'off');
-        contentInput.setAttribute('spellcheck', 'false');
-        contentInput.addEventListener('dragstart', (event) => {
-          if (event && typeof event.preventDefault === 'function') event.preventDefault();
-        });
-        bindActivity(contentInput);
-        const hideRow = contentWrap.createDiv({ cls: 'xsv-actions xsv-actions-start' });
-        const hideButton = hideRow.createEl('button', { cls: 'xsv-btn xsv-btn-small', text: t('btn_hide_again') });
-        hideButton.addEventListener('click', () => {
-          this.draftContent = contentInput ? contentInput.value : this.draftContent;
-          this.contentRevealed = false;
-          plugin.touchActivity();
-          renderContentArea();
-        });
-        return;
-      }
-      contentInput = null;
-      contentWrap.createDiv({ cls: 'xsv-masked', text: '••••••••' });
-      const showButton = contentWrap.createEl('button', {
-        cls: 'xsv-btn xsv-btn-small',
-        text: t('btn_reveal'),
-      });
-      showButton.addEventListener('click', () => {
-        this.contentRevealed = true;
-        plugin.touchActivity();
-        renderContentArea();
-      });
-    };
-    renderContentArea();
-
-    const noteWrap = field(t('field_note'));
-    const noteInput = noteWrap.createEl('textarea', { cls: 'xsv-input xsv-textarea' });
-    noteInput.rows = 2;
-    noteInput.value = entry ? entry.note : '';
-    harden(noteInput);
-    bindActivity(noteInput);
-
-    const errorEl = form.createDiv({ cls: 'xsv-error' });
-    errorEl.setText('');
-
-    const actions = form.createDiv({ cls: 'xsv-actions' });
-    const cancelButton = actions.createEl('button', { cls: 'xsv-btn', text: t('btn_cancel') });
-    cancelButton.addEventListener('click', () => this.close());
-    const saveButton = actions.createEl('button', {
-      cls: 'xsv-btn xsv-btn-primary',
-      text: t('btn_save'),
-    });
-
-    const submit = async () => {
-      const name = nameInput.value.trim();
-      if (!name) {
-        errorEl.setText(t('notice_name_required'));
-        return;
-      }
-      const payload = {
-        name,
-        type: typeSelect.value,
-        tags: sanitizeTags(tagsInput.value),
-        content: this.contentRevealed && contentInput ? contentInput.value : this.draftContent,
-        note: noteInput.value,
-      };
-      errorEl.setText('');
-      saveButton.disabled = true;
-      try {
-        if (entry) {
-          const result = await plugin.updateEntry(entry.id, payload);
-          if (result === false) {
-            // 锁定 / 外部冲突 / 写盘失败：不得再提示“已保存”
-            errorEl.setText(t(plugin.conflictPending ? 'err_conflict_editing_blocked' : 'err_save_discarded'));
-            return;
-          }
-          new Notice(t(result === 'unchanged' ? 'notice_unchanged' : 'notice_saved'), 3000);
-          if (result !== 'unchanged') plugin.maybeHintNoteContent(payload.content);
-        } else {
-          const created = await plugin.addEntry(payload);
-          if (!created) {
-            errorEl.setText(t(plugin.conflictPending ? 'err_conflict_editing_blocked' : 'err_save_discarded'));
-            return;
-          }
-          new Notice(t('notice_saved'), 3000);
-          plugin.maybeHintNoteContent(payload.content);
-        }
-        this.close();
-      } catch (error) {
-        console.error('[' + PLUGIN_ID + '] save entry failed:', error);
-        errorEl.setText(t('err_generic', { msg: errorMessage(error) }));
-      } finally {
-        saveButton.disabled = false;
-      }
-    };
-
-    saveButton.addEventListener('click', () => void submit());
-    if (!entry && typeof nameInput.focus === 'function') nameInput.focus();
-  }
-
-  onClose() {
-    this.plugin.untrackModal(this);
-    this.contentEl.empty();
-    this.draftContent = '';
-    this.contentRevealed = false;
-    this.prefill = null;
-    // 不保留明文条目对象引用
-    this.entry = null;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* 删除确认弹窗                                                        */
-/* ------------------------------------------------------------------ */
-class SecretDeleteModal extends Modal {
-  constructor(app, plugin, entry) {
-    super(app);
-    this.plugin = plugin;
-    this.entry = entry;
-  }
-
-  onOpen() {
-    this.plugin.trackModal(this);
-    this.plugin.touchActivity();
-    this.titleEl.setText(this.plugin.t('delete_title'));
-    this.contentEl.createDiv({
-      cls: 'xsv-desc',
-      text: this.plugin.t('delete_desc', { name: this.entry.name }),
-    });
-    const actions = this.contentEl.createDiv({ cls: 'xsv-actions' });
-    const cancelButton = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_cancel') });
-    cancelButton.addEventListener('click', () => this.close());
-    const deleteButton = actions.createEl('button', {
-      cls: 'xsv-btn xsv-btn-danger',
-      text: this.plugin.t('btn_confirm_delete'),
-    });
-    deleteButton.addEventListener('click', async () => {
-      deleteButton.disabled = true;
-      try {
-        const deleted = await this.plugin.deleteEntry(this.entry.id);
-        if (!deleted) {
-          new Notice(this.plugin.t('err_save_discarded'), 6000);
-          deleteButton.disabled = false;
-          return;
-        }
-        new Notice(this.plugin.t('notice_deleted'), 3000);
-        this.close();
-        this.plugin.refreshViews();
-      } catch (error) {
-        console.error('[' + PLUGIN_ID + '] delete entry failed:', error);
-        new Notice(this.plugin.t('err_generic', { msg: errorMessage(error) }), 6000);
-        deleteButton.disabled = false;
-      }
-    });
-  }
-
-  onClose() {
-    this.plugin.untrackModal(this);
-    this.contentEl.empty();
-    // 删除确认弹窗同样持有含明文的条目对象，关闭即释放
-    this.entry = null;
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1884,7 +1455,7 @@ class XUSecretVault extends Plugin {
   idleDeadline = 0;
   clipboardTimer = 0;
   clipboardText = null;
-  openModals = new Set();
+
   writeChain = Promise.resolve();
   sessionGeneration = 0;
   knownBlobHash = null;
@@ -1903,7 +1474,6 @@ class XUSecretVault extends Plugin {
   vaultSources = [];
   selectedVaultPath = '';
   v1UpgradeWarned = false;
-  markdownHintShown = false;
 
   // 统一单调时钟：退避、空闲与后台计时都不受系统时间跳变影响
   nowMs() {
@@ -1954,14 +1524,6 @@ class XUSecretVault extends Plugin {
         }
       },
     });
-    this.addCommand({
-      id: 'new-entry',
-      name: this.t('cmd_add'),
-      callback: () => {
-        void this.openEntryCreator();
-      },
-    });
-
     this.registerInterval(globalThis.setInterval(() => this.checkAutoLock(), 15000));
 
     // 启动清理：删除上次异常退出可能留下的本插件临时密文（*.tmp*）
@@ -1977,6 +1539,39 @@ class XUSecretVault extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       if (!this.cryptoApi) new Notice(this.t('err_crypto_unavailable'), 10000);
+      // 旧版侧栏视图类型已不再注册：清掉工作区里残留的旧 leaf，
+      // 避免它作为未知视图残留在侧栏，与新整页入口形成两个入口
+      const cleanupLegacy = () => {
+        const targets = new Set();
+        try {
+          for (const leaf of this.app.workspace.getLeavesOfType(LEGACY_VIEW_TYPE) || []) targets.add(leaf);
+        } catch (error) {
+          /* ignore */
+        }
+        // 兼容恢复成占位视图（getLeavesOfType 匹配不到）的情况
+        try {
+          this.app.workspace.iterateAllLeaves((leaf) => {
+            let type = '';
+            try {
+              type = leaf.view && typeof leaf.view.getViewType === 'function' ? leaf.view.getViewType() : '';
+            } catch (error) {
+              type = '';
+            }
+            if (type === LEGACY_VIEW_TYPE) targets.add(leaf);
+          });
+        } catch (error) {
+          /* ignore */
+        }
+        for (const leaf of targets) {
+          try {
+            leaf.detach();
+          } catch (error) {
+            /* ignore */
+          }
+        }
+      };
+      cleanupLegacy();
+      globalThis.setTimeout(cleanupLegacy, 500);
     });
 
     console.debug('[' + PLUGIN_ID + '] loaded v' + this.manifest.version);
@@ -2884,8 +2479,6 @@ class XUSecretVault extends Plugin {
     this.selectedVaultPath = '';
     this.lastUnlockError = '';
 
-    this.closeOpenModals();
-
     this.clearClipboardTimer();
     if (this.clipboardText) void this.clearClipboardIfOwned(false);
     this.clipboardText = null;
@@ -2894,18 +2487,6 @@ class XUSecretVault extends Plugin {
     this.refreshViews();
     void this.scanVaultSources();
     if (hadSession) console.debug('[' + PLUGIN_ID + '] locked');
-  }
-
-  // 关闭本插件打开的所有弹窗；onClose 会清空内容并丢弃明文对象
-  closeOpenModals() {
-    for (const modal of Array.from(this.openModals)) {
-      try {
-        modal.close();
-      } catch (error) {
-        /* ignore */
-      }
-    }
-    this.openModals.clear();
   }
 
   clearViewScreens() {
@@ -2973,15 +2554,6 @@ class XUSecretVault extends Plugin {
     return true;
   }
 
-  // 条目内容疑似笔记时，保存成功后提示一次（同一插件会话只弹一次）
-  maybeHintNoteContent(content) {
-    if (this.markdownHintShown) return false;
-    if (!looksLikeMarkdownNote(content)) return false;
-    this.markdownHintShown = true;
-    new Notice(this.t('notice_note_content_hint'), 6000);
-    return true;
-  }
-
   async deleteEntry(id) {
     this.assertUnlocked();
     const result = await this.commitEntries((current) => {
@@ -2999,26 +2571,19 @@ class XUSecretVault extends Plugin {
     return Array.from(randomBytes(cryptoObj, 16), (byte) => byte.toString(16).padStart(2, '0')).join('');
   }
 
-  typeLabel(type) {
-    if (type === 'api-key') return this.t('type_api_key');
-    if (type === 'private-key') return this.t('type_private_key');
-    if (type === 'note') return this.t('type_note');
-    return this.t('type_password');
-  }
-
   /* ---------------- 剪贴板与自动锁定 ---------------- */
 
   async copySecret(text) {
-    if (!text) return;
+    if (!text) return false;
     this.touchActivity();
-    if (!this.isUnlocked()) return;
+    if (!this.isUnlocked()) return false;
     if (this.suspended) {
       new Notice(this.t('err_suspended'), 5000);
-      return;
+      return false;
     }
     if (this.conflictPending) {
       new Notice(this.t('err_conflict_editing_blocked'), 6000);
-      return;
+      return false;
     }
     if (
       typeof navigator === 'undefined' ||
@@ -3026,9 +2591,15 @@ class XUSecretVault extends Plugin {
       typeof navigator.clipboard.writeText !== 'function'
     ) {
       new Notice(this.t('err_clipboard_unavailable'), 6000);
-      return;
+      return false;
     }
-    await navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (error) {
+      console.error('[' + PLUGIN_ID + '] clipboard write failed:', error);
+      new Notice(this.t('err_clipboard_unavailable'), 6000);
+      return false;
+    }
     // 写剪贴板期间若已锁定，立即清空，不再把明文写回内存或起定时器
     if (!this.isUnlocked()) {
       try {
@@ -3036,7 +2607,7 @@ class XUSecretVault extends Plugin {
       } catch (error) {
         console.error('[' + PLUGIN_ID + '] clipboard cleanup failed:', error);
       }
-      return;
+      return false;
     }
     this.clipboardText = text;
     this.clearClipboardTimer();
@@ -3045,6 +2616,7 @@ class XUSecretVault extends Plugin {
     this.clipboardTimer = globalThis.setTimeout(() => {
       void this.clearClipboardIfOwned(true);
     }, seconds * 1000);
+    return true;
   }
 
   async clearClipboardIfOwned(notify) {
@@ -3149,8 +2721,6 @@ class XUSecretVault extends Plugin {
   suspendForBackground() {
     if (!this.isUnlocked()) return;
     this.suspended = true;
-    // 已打开的弹窗可能正显示明文：先关掉（onClose 会清空内容并丢弃明文对象）
-    this.closeOpenModals();
     this.clearViewScreens();
     this.maskAllViews();
     this.refreshViews();
@@ -3203,16 +2773,6 @@ class XUSecretVault extends Plugin {
     }
   }
 
-  /* ---------------- Modal 追踪 ---------------- */
-
-  trackModal(modal) {
-    this.openModals.add(modal);
-  }
-
-  untrackModal(modal) {
-    this.openModals.delete(modal);
-  }
-
   /* ---------------- 视图与命令 ---------------- */
 
   refreshViews() {
@@ -3238,56 +2798,64 @@ class XUSecretVault extends Plugin {
     }
   }
 
+  // 在主编辑区打开整页视图；已存在时只聚焦，不新建
   async openVaultView() {
-    let leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    // 快照旧 leaf 集合：后续只对「本次新建」的 leaf 做兜底清理
+    let leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE).slice();
     if (!leaves.length) {
       await delay(60);
-      leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+      leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE).slice();
     }
     if (leaves.length) {
       await this.app.workspace.revealLeaf(leaves[0]);
       return leaves[0];
     }
 
-    let leaf = null;
-    if (typeof this.app.workspace.ensureSideLeaf === 'function') {
-      leaf = await this.app.workspace.ensureSideLeaf(VIEW_TYPE, 'right', { active: true, reveal: true });
-    } else if (typeof this.app.workspace.getRightLeaf === 'function') {
-      leaf = this.app.workspace.getRightLeaf(false);
-      if (leaf) await leaf.setViewState({ type: VIEW_TYPE });
+    const workspace = this.app.workspace;
+    let created = null;
+    if (typeof workspace.getLeaf === 'function') {
+      created = workspace.getLeaf(true);
     }
-    if (leaf) await this.app.workspace.revealLeaf(leaf);
-    return leaf;
-  }
+    if (!created) {
+      new Notice(this.t('err_view_open_failed'), 5000);
+      return null;
+    }
+    try {
+      await created.setViewState({ type: VIEW_TYPE, active: true });
+    } catch (error) {
+      /* 下面统一做延时复查 */
+    }
 
-  async openEntryCreator() {
-    await this.openVaultView();
-    if (!this.isUnlocked()) {
-      new Notice(this.t('notice_unlock_first'), 5000);
-      return;
-    }
-    // 遮罩期间执行「新增条目」也必须被拒绝，先重验主密码
-    if (this.suspended) {
-      new Notice(this.t('err_suspended'), 5000);
-      return;
-    }
-    if (this.conflictPending) {
-      new Notice(this.t('err_conflict_editing_blocked'), 6000);
-      return;
-    }
-    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
-    for (const leaf of leaves) {
-      const view = leaf && leaf.view;
-      if (
-        view &&
-        typeof view.getViewType === 'function' &&
-        view.getViewType() === VIEW_TYPE &&
-        typeof view.openAddModal === 'function'
-      ) {
-        view.openAddModal();
-        return;
+    // ghost / empty 占位复查：视图可能晚一拍才挂到 leaf 上
+    let ready = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE).slice();
+      if (leaves.length) {
+        ready = true;
+        break;
       }
+      await delay(attempt === 0 ? 80 : 200);
     }
+    if (ready) {
+      // 单实例：若此时已有多张，只聚焦最早一张，不批量 detach
+      await this.app.workspace.revealLeaf(leaves[0]);
+      return leaves[0];
+    }
+
+    // 500ms 兜底：仍然只有空占位，撤掉本次自己新建的 leaf，不动旧 leaf
+    await delay(220);
+    leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE).slice();
+    if (leaves.length) {
+      await this.app.workspace.revealLeaf(leaves[0]);
+      return leaves[0];
+    }
+    try {
+      created.detach();
+    } catch (error) {
+      /* ignore */
+    }
+    new Notice(this.t('err_view_open_failed'), 5000);
+    return null;
   }
 }
 

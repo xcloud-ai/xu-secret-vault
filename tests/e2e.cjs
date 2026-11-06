@@ -1,4 +1,4 @@
-/* XU Secret Vault 0.1.5 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
+/* XU Secret Vault 0.3.0 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
 'use strict';
 
 const fs = require('fs');
@@ -334,6 +334,22 @@ const app = {
           leaf.view.getViewType() === type
       ),
     revealLeaf: async (leaf) => leaf,
+    getLeaf: () => {
+      let mounted = false;
+      const leaf = {
+        app,
+        view: null,
+        setViewState: async (state) => {
+          const factory = activePlugin.__viewFactories[state.type];
+          if (factory && !mounted) {
+            leaf.view = factory(leaf);
+            mounted = true;
+            leaves.push(leaf);
+          }
+        },
+      };
+      return leaf;
+    },
     ensureSideLeaf: async (type) => {
       const leaf = { app, view: null, setViewState: async () => {} };
       const factory = activePlugin.__viewFactories[type];
@@ -374,6 +390,11 @@ function makeEventTarget() {
 }
 const documentStub = makeEventTarget();
 const windowStub = makeEventTarget();
+const openCalls = [];
+windowStub.open = (url) => {
+  openCalls.push(url);
+  return null;
+};
 
 class ItemView {
   constructor(leaf) {
@@ -498,12 +519,25 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.2.1',
+    version: '0.3.0',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
   plugin.settings.vaultPath = VAULT_PATH;
+  // 旧版侧栏实例：模拟 0.2.1 遗留的侧栏 leaf，启动时应被清理，不再复活成第二个入口
+  const legacyLeaf = {
+    app,
+    view: { getViewType: () => 'xu-secret-vault-view' },
+    detach: () => {
+      const index = leaves.indexOf(legacyLeaf);
+      if (index >= 0) leaves.splice(index, 1);
+    },
+  };
+  leaves.push(legacyLeaf);
   await plugin.onload();
+  ok(!leaves.includes(legacyLeaf), '启动时清理旧侧栏视图 leaf（不会复活成侧栏）');
+  ok(plugin.__viewFactories['xu-secret-vault-view'] === undefined, '不再注册旧侧栏视图类型');
+  ok(plugin.__viewFactories['xu-secret-vault-page'] !== undefined, '注册了整页视图类型');
 
   const restart = () => {
     // 模拟重启：K-09 的失败计数与退避只在内存，重启即清零
@@ -514,23 +548,21 @@ try {
     restart();
     return plugin.unlock(password);
   };
-  const showSecret = () => {
-    if (String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0) {
-      const button = findButton(view.contentEl, '显示');
-      if (button) button.click();
-    }
-  };
   const restoreVault = (text) => fileStore.set(VAULT_PATH, text);
   const goodText = () => fileStore.get(VAULT_PATH);
 
   ok(plugin.cryptoApi !== null, 'WebCrypto 探测可用');
 
-  // 1) 首次使用 UI：创建保险库
+  // 1) 首次使用 UI：创建保险库（整页视图）
   const leaf = await plugin.openVaultView();
+  ok(leaf !== null && leaf.view && leaf.view.getViewType() === 'xu-secret-vault-page', '从主编辑区打开整页视图');
+  ok(leaves.length === 1, '首次打开只创建一个整页 leaf');
   const view = leaf.view;
   await view.onOpen();
   await waitFor(() => plugin.vaultState !== 'unknown', '检测保险库状态');
   ok(String(textOf(view.contentEl)).indexOf('创建主密码') >= 0, '首次使用显示创建主密码界面');
+  ok(findAll(view.contentEl, (el) => el.hasClass('xsv-page')).length === 1, '整页布局根节点生效');
+  ok(findAll(view.contentEl, (el) => el.hasClass('xsv-page-card')).length === 1, '创建/解锁卡片居中显示');
 
   const passwordInputs = findAll(
     view.contentEl,
@@ -543,7 +575,10 @@ try {
   ok(!!createButton, '找到创建保险库按钮');
   const createStart = Date.now();
   createButton.click();
-  await waitFor(() => plugin.isUnlocked(), '创建保险库完成');
+  await waitFor(
+    () => plugin.isUnlocked() && plugin.settings.initializedPath === VAULT_PATH,
+    '创建保险库完成'
+  );
   const createMs = Date.now() - createStart;
 
   ok(fileStore.has(VAULT_PATH), '创建后生成密文文件 ' + VAULT_PATH);
@@ -591,91 +626,100 @@ try {
   fileStore.delete(VAULT_PATH + '.tmp-20200101-000000-toolong123');
   fileStore.delete(VAULT_PATH + '.tmp-' + nowStamp + '-abcdef12');
 
-  // 2) 通过 UI 新增条目
-  const addButton = findButton(view.contentEl, '新增');
-  ok(!!addButton, '找到新增按钮');
-  addButton.click();
-  const addModal = Array.from(plugin.openModals)[0];
-  ok(!!addModal, '新增弹窗已打开');
-  const modalInputs = findAll(addModal.contentEl, (el) => el.tagName === 'INPUT' && el.type === 'text');
-  const modalTextareas = findAll(addModal.contentEl, (el) => el.tagName === 'TEXTAREA');
-  ok(modalInputs.length === 2 && modalTextareas.length === 2, '弹窗字段齐全（名称/标签/内容/备注）');
-  ok(modalTextareas[0].getAttribute('spellcheck') === 'false', '内容输入框关闭拼写检查');
-  ok(modalTextareas[0].getAttribute('autocomplete') === 'off', '内容输入框关闭自动填充');
-  modalInputs[0].value = 'Alpha';
-  modalInputs[1].value = 'work, cloud';
-  modalTextareas[0].value = SECRET_ONE;
-  modalTextareas[1].value = 'primary credential';
-  const saveButton = findButton(addModal.contentEl, '保存');
-  saveButton.click();
-  await waitFor(() => !addModal.isOpen && plugin.entries.length === 1, '新增条目落盘');
-
+  // 2) 条目数据层：0.3.0 起条目 CRUD 界面已下线，直接用插件 API 准备引用数据
+  const alphaEntry = await plugin.addEntry({
+    name: 'Alpha',
+    type: 'password',
+    content: SECRET_ONE,
+    tags: ['work', 'cloud'],
+    note: 'primary credential',
+  });
+  ok(!!alphaEntry && typeof alphaEntry.id === 'string', '数据层新增条目返回带 id 的对象');
+  ok(plugin.entries.length === 1, '新增后内存中有一条条目');
   ok(plugin.entries[0].name === 'Alpha', '条目名称已保存');
   ok(plugin.entries[0].content === SECRET_ONE, '条目内容已保存在内存');
-  ok(plugin.entries[0].tags.join(',') === 'work,cloud', '标签去重并保存');
+  ok(plugin.entries[0].tags.join(',') === 'work,cloud', '标签按数组保存');
   const env1 = JSON.parse(fileStore.get(VAULT_PATH));
   ok(env1.cipher.iv !== env0.cipher.iv, '新增写盘生成了新的 IV');
   ok(env1.kdf.salt === env0.kdf.salt, '同一保险库盐保持不变');
   ok(!fileStore.has(VAULT_PATH + '.bak'), '目标已存在时首次保存成功替换且不残留 .bak');
   ok(tmpFiles().length === 0, '首次保存不残留 .tmp');
 
-  // 3) 列表中默认不显示明文，点击「显示」后才出现
-  ok(String(textOf(view.contentEl)).indexOf(SECRET_ONE) < 0, '列表中默认隐藏明文');
-  const revealButton = findButton(view.contentEl, '显示');
-  ok(!!revealButton, '找到显示按钮');
-  revealButton.click();
-  ok(String(textOf(view.contentEl)).indexOf(SECRET_ONE) >= 0, '点击显示后明文出现在界面');
+  // 3) 界面只剩笔记：条目明文不渲染，条目管理入口与模式切换全部下线
+  view.render();
+  ok(String(textOf(view.contentEl)).indexOf(SECRET_ONE) < 0, '负向：界面不显示条目明文');
+  ok(!findButton(view.contentEl, '新增'), '不再提供新增条目入口');
+  ok(!findButton(view.contentEl, '编辑'), '不再提供编辑条目入口');
+  ok(!findButton(view.contentEl, '删除'), '不再提供删除条目入口');
+  ok(!findButton(view.contentEl, '显示'), '不再提供显示条目入口');
+  ok(!findButton(view.contentEl, '表格'), '面板顶部不再有「表格」切换');
+  ok(!findButton(view.contentEl, '笔记'), '面板顶部不再有「笔记」切换');
+  for (const id of ['new-entry', 'edit-entry', 'delete-entry']) {
+    ok(!plugin.__commands.some((command) => command.id === id), '条目命令 ' + id + ' 已下线');
+  }
 
-  // 4) 复制到剪贴板
-  const copyButton = findButton(view.contentEl, '复制');
-  copyButton.click();
-  await waitFor(() => clipboard === SECRET_ONE, '复制到剪贴板');
+  // 4) 复制：数据层 copySecret 返回成功并沿用自动清空逻辑
+  clipboard = '';
+  notices.length = 0;
+  ok((await plugin.copySecret(SECRET_ONE)) === true, 'copySecret 成功返回 true');
   ok(clipboard === SECRET_ONE, '复制动作写入剪贴板');
+  ok(notices.some((message) => message.indexOf('秒后自动清空') >= 0), '复制提示包含自动清空秒数');
+  ok(plugin.clipboardTimer !== 0, '复制后启动自动清空定时器');
+  await plugin.clearClipboardIfOwned(false);
+  clipboard = '';
 
-  // 5) 编辑：内容默认掩码，点「显示」后才呈现（G-10）
-  const editButton = findButton(view.contentEl, '编辑');
-  editButton.click();
-  const editModal = Array.from(plugin.openModals)[0];
-  ok(!!editModal, '编辑弹窗已打开');
-  ok(String(textOf(editModal.contentEl)).indexOf(SECRET_ONE) < 0, '编辑弹窗默认不回显明文');
-  const modalReveal = findButton(editModal.contentEl, '显示');
-  ok(!!modalReveal, '编辑弹窗提供显式显示按钮');
-  modalReveal.click();
-  const editTextareas = findAll(editModal.contentEl, (el) => el.tagName === 'TEXTAREA');
-  ok(editTextareas.length === 2, '显形后出现内容与备注输入框');
-  ok(editTextareas[0].value === SECRET_ONE, '显形后载入原明文');
-  editTextareas[0].value = SECRET_TWO;
-  findButton(editModal.contentEl, '保存').click();
-  await waitFor(() => !editModal.isOpen, '编辑保存完成');
-  ok(plugin.entries[0].content === SECRET_TWO, '编辑后的内容已更新');
+  // 5) 数据层更新条目：写盘换 IV，界面与磁盘都不残留明文
+  const updateResult = await plugin.updateEntry(alphaEntry.id, {
+    name: 'Alpha',
+    type: 'password',
+    content: SECRET_TWO,
+    tags: ['work', 'cloud'],
+    note: 'primary credential',
+  });
+  ok(updateResult !== 'unchanged', '内容变化时 updateEntry 触发写盘');
+  ok(plugin.entries[0].content === SECRET_TWO, '更新后的内容已写入内存');
   const env2 = JSON.parse(fileStore.get(VAULT_PATH));
-  ok(env2.cipher.iv !== env1.cipher.iv, '编辑写盘生成了新的 IV');
+  ok(env2.cipher.iv !== env1.cipher.iv, '更新写盘生成了新的 IV');
   ok(!fileStore.has(VAULT_PATH + '.bak') && tmpFiles().length === 0, '连续保存不残留 .bak / .tmp');
-  ok(String(fileStore.get(VAULT_PATH)).indexOf(SECRET_TWO) < 0, '负向：密文 blob 不含条目明文（编辑后）');
+  ok(String(fileStore.get(VAULT_PATH)).indexOf(SECRET_TWO) < 0, '负向：密文 blob 不含条目明文（更新后）');
   ok(String(fileStore.get(VAULT_PATH)).indexOf(SECRET_ONE) < 0, '负向：密文 blob 不含旧明文');
+  ok(
+    (await plugin.updateEntry(alphaEntry.id, {
+      name: 'Alpha',
+      type: 'password',
+      content: SECRET_TWO,
+      tags: ['work', 'cloud'],
+      note: 'primary credential',
+    })) === 'unchanged',
+    '内容未变化时 updateEntry 不写盘'
+  );
 
-  // 6) 锁定：同步清屏、关闭 Modal、清剪贴板、丢弃密钥、DOM 无明文
-  showSecret();
+  // 5b) 准备一篇含明文的笔记，供锁定 / 遮罩 / 整页 DOM 断言使用
+  const NOTE_PLAIN = '账号表\n\n| 名称 | 密码 |\n| --- | --- |\n| Alpha | ' + SECRET_TWO + ' |';
+  await plugin.saveNote('note-primary', NOTE_PLAIN);
+  view.render();
+  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '笔记正文的明文在整页渲染区可见');
+
+  // 6) 锁定：同步清屏、清剪贴板、丢弃密钥、整页 DOM 无明文
+  view.render();
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '锁定前明文可见（构造测试场景）');
-
-  findButton(view.contentEl, '编辑').click();
-  const openModal = Array.from(plugin.openModals)[0];
-  findButton(openModal.contentEl, '显示').click();
-  ok(String(textOf(openModal.contentEl)).indexOf(SECRET_TWO) >= 0, '锁定前编辑弹窗显形后含明文');
-
+  clipboard = '';
+  await plugin.copySecret(SECRET_TWO);
+  ok(clipboard === SECRET_TWO, '锁定前剪贴板含密钥');
+  notices.length = 0;
   plugin.lock();
   ok(plugin.sessionKey === null, '锁定后 CryptoKey 已丢弃');
   ok(plugin.entries.length === 0, '锁定后内存条目集合已清空');
-  ok(plugin.openModals.size === 0 && openModal.isOpen === false, '锁定关闭所有编辑弹窗');
-  ok(String(textOf(openModal.contentEl)).indexOf(SECRET_TWO) < 0, '锁定后弹窗 DOM 不含明文');
-  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '负向：锁定后面板 DOM 不含明文');
+  ok(plugin.notes.length === 0, '锁定后内存笔记集合已清空');
+  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '负向：锁定后整页 DOM 不含明文');
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-note-body')).length, '锁定后笔记渲染区被移除');
+  ok(!findAll(view.contentEl, (el) => el.tagName === 'TEXTAREA').length, '锁定后编辑器被移除');
   await waitFor(() => clipboard === '', '锁定后清空剪贴板');
   ok(clipboard === '', '锁定后剪贴板已清空');
 
   // 7) 关闭视图即清屏并锁定（M-09 / G-01）
   await unlockFresh(MASTER);
   view.render();
-  showSecret();
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '关闭视图前明文可见');
   await view.onClose();
   ok(plugin.sessionKey === null, '关闭视图触发锁定');
@@ -685,7 +729,6 @@ try {
   // 8) 切后台遮罩 + 回到前台重新验证（M-05 / G-08）
   await unlockFresh(MASTER);
   view.render();
-  showSecret();
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '遮罩前明文可见');
   documentStub.hidden = true;
   documentStub.fire('visibilitychange');
@@ -702,10 +745,9 @@ try {
   findButton(view.contentEl, '验证并继续').click();
   await waitFor(() => view.masked === false, '重新验证主密码');
   ok(view.masked === false, '正确主密码解除遮罩');
-  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '解除遮罩后不自动回显明文');
+  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '解除遮罩后按解锁态重新渲染笔记');
 
   // blur 同样遮罩
-  showSecret();
   windowStub.fire('blur');
   ok(view.masked === true && String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '窗口失焦同样遮罩并清屏');
 
@@ -800,31 +842,18 @@ try {
   ok(plugin.entries.length === 1 && plugin.entries[0].content === SECRET_TWO, '重新解锁后内容仍正确');
   ok(plugin.sessionKey.extractable === false, '重新解锁的密钥仍 non-extractable');
 
-  // 10b) 弹窗揭示明文后失焦：关闭弹窗、清屏、未重验不可读（G-08 / suspended）
+  // 10b) 失焦：清屏、挂起、未重验不可读（G-08 / suspended）
   view.render();
-  const modalEditButton = findButton(view.contentEl, '编辑');
-  ok(!!modalEditButton, '解锁列表提供编辑入口');
-  modalEditButton.click();
-  const entryModal = Array.from(plugin.openModals)[0];
-  ok(!!entryModal, '编辑弹窗已打开');
-  findButton(entryModal.contentEl, '显示').click();
-  ok(String(textOf(entryModal.contentEl)).indexOf(SECRET_TWO) >= 0, '弹窗中已揭示明文');
+  ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '失焦前明文可见');
   windowStub.fire('blur');
   await delay(20);
-  ok(entryModal.isOpen === false && plugin.openModals.size === 0, '失焦后关闭本插件所有弹窗');
-  ok(String(textOf(entryModal.contentEl)).indexOf(SECRET_TWO) < 0, '负向：弹窗关闭后 DOM 不含明文');
   ok(plugin.suspended === true, '失焦后进入挂起态');
-  ok(view.masked === true, '失焦后面板加遮罩');
+  ok(view.masked === true, '失焦后整页面板加遮罩');
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) < 0, '负向：遮罩后 DOM 不含明文');
   ok(plugin.sessionKey !== null, '挂起但未超时仍保留会话密钥');
 
-  // 遮罩期间命令入口与写操作一律拒绝
-  const addCommand = plugin.__commands.find((command) => command.id === 'new-entry');
-  ok(!!addCommand, '新增条目命令已注册');
-  addCommand.callback();
-  await delay(80);
-  ok(plugin.openModals.size === 0, '负向：遮罩期间执行「新增条目」命令被拒绝');
-  ok(notices.some((message) => message.indexOf('挂起') >= 0), '拒绝时提示需重新验证');
+  // 遮罩期间写操作一律拒绝；条目命令已随 UI 下线
+  ok(!plugin.__commands.some((command) => command.id === 'new-entry'), '新增条目命令已随 UI 下线');
   await rejects(
     plugin.addEntry({ name: 'MaskedAdd', type: 'note', content: SECRET_ONE }),
     '挂起',
@@ -866,7 +895,6 @@ try {
 
   // 11) 自动锁定同样清屏
   view.render();
-  showSecret();
   ok(String(textOf(view.contentEl)).indexOf(SECRET_TWO) >= 0, '自动锁定前明文可见');
   plugin.idleDeadline = plugin.nowMs() - 1;
   plugin.idleDeadlineWall = Date.now() - 1;
@@ -881,7 +909,7 @@ try {
   view.render();
   await view.onOpen();
   const leaf2 = { app, view: null };
-  const view2 = plugin.__viewFactories['xu-secret-vault-view'](leaf2);
+  const view2 = plugin.__viewFactories['xu-secret-vault-page'](leaf2);
   leaf2.view = view2;
   leaves.push(leaf2);
   await view2.onOpen();
@@ -921,13 +949,12 @@ try {
   plugin.hiddenAt = 0;
   plugin.hiddenAtWall = 0;
 
-  // 12) 删除（UI 二次确认），再次解锁确认已删除
+  // 12) 数据层删除，再次解锁确认已删除
   await unlockFresh(MASTER);
   view.render();
-  findButton(view.contentEl, '删除').click();
-  const deleteModal = Array.from(plugin.openModals)[0];
-  ok(!!deleteModal, '删除确认弹窗已打开');
-  findButton(deleteModal.contentEl, '确认删除').click();
+  ok(plugin.entries.length === 1, '删除前内存中有一条条目');
+  const deleteResult = await plugin.deleteEntry(alphaEntry.id);
+  ok(deleteResult !== false, 'deleteEntry 成功写盘');
   await waitFor(() => plugin.entries.length === 0, '删除条目完成');
   ok(plugin.entries.length === 0, '条目已删除');
   const env3Text = fileStore.get(VAULT_PATH);
@@ -1238,10 +1265,15 @@ try {
   ok(plugin.isReadOnlyCopy() === true, '选中副本后进入只读态');
   ok(String(textOf(view.contentEl)).indexOf('正在查看冲突副本（只读）') >= 0, '显示只读横幅');
   ok(String(textOf(view.contentEl)).indexOf('不会写回正式保险库') >= 0, '横幅明确不会写回正式库');
-  ok(!findButton(view.contentEl, '新增'), '只读态隐藏新增入口');
-  ok(!findButton(view.contentEl, '编辑'), '只读态隐藏编辑入口');
-  ok(!findButton(view.contentEl, '删除'), '只读态隐藏删除入口');
-  ok(!!findButton(view.contentEl, '复制'), '只读态保留复制入口');
+  ok(!findButton(view.contentEl, '编辑笔记'), '只读态隐藏笔记编辑入口');
+  ok(
+    !findButton(view.contentEl, '新增') &&
+      !findButton(view.contentEl, '编辑') &&
+      !findButton(view.contentEl, '删除') &&
+      !findButton(view.contentEl, '显示'),
+    '只读态不存在任何条目管理入口'
+  );
+  ok(findAll(view.contentEl, (el) => el.hasClass('xsv-notes')).length === 1, '只读态仍渲染笔记列表与阅读区');
   const canonicalBeforeWrite = fileStore.get(VAULT_PATH);
   const copyBeforeWrite = fileStore.get(conflictCopy);
   await rejects(
@@ -1361,9 +1393,8 @@ try {
 
   // 20c) 视图：表格 / 笔记切换
   view.render();
-  ok(!!findButton(view.contentEl, '表格') && !!findButton(view.contentEl, '笔记'), '顶部显示表格 / 笔记切换');
-  findButton(view.contentEl, '笔记').click();
-  ok(view.mode === 'notes', '点击「笔记」进入笔记模式');
+  ok(!findButton(view.contentEl, '表格') && !findButton(view.contentEl, '笔记'), '0.3.0 顶部无表格 / 笔记切换');
+  ok(findAll(view.contentEl, (el) => el.hasClass('xsv-page')).length === 1, '解锁后为整页布局');
   ok(view.contentEl.querySelector('.xsv-notes') !== null, '渲染笔记布局');
   ok(!!findButton(view.contentEl, '我的密钥'), '笔记列表显示默认笔记标题');
   const noteText = textOf(view.contentEl);
@@ -1478,7 +1509,6 @@ try {
   await plugin.scanVaultSources();
   plugin.selectedVaultPath = readOnlyCopy;
   ok((await plugin.unlock(MASTER)) === true, '只读副本可解锁');
-  view.mode = 'notes';
   view.render();
   ok(plugin.isReadOnlyCopy() === true, '查看副本时进入只读态');
   ok(!findButton(view.contentEl, '编辑笔记'), '只读副本下不提供笔记编辑入口');
@@ -1497,33 +1527,14 @@ try {
   fileStore.delete(readOnlyCopy);
   ok(plugin.isReadOnlyCopy() === false && plugin.selectedVaultPath === '', '锁定后只读态复位');
 
-  // 21) 0.2.1 可用性增强
-  ok((await plugin.unlock(MASTER)) === true, '解锁以测试 0.2.1');
+  // 21) 0.3.0 笔记界面交互（示例表格 / 可用条目名 / 草稿清理）
+  ok((await plugin.unlock(MASTER)) === true, '解锁以测试笔记界面');
   await plugin.saveNote('note-primary', '');
-  view.mode = 'table';
-  view.noteEmptyHintShown = false;
   view.render();
-  const tableTab = findButton(view.contentEl, '表格');
-  const notesTab = findButton(view.contentEl, '笔记');
-  ok(!!tableTab && tableTab.hasClass('xsv-mode-tab-table'), '表格切换按钮带独立图标类');
-  ok(!!notesTab && notesTab.hasClass('xsv-mode-tab-notes'), '笔记切换按钮带独立图标类');
-  ok(tableTab.hasClass('xsv-mode-tab-active') && !notesTab.hasClass('xsv-mode-tab-active'), '当前模式选中态正确');
-  notices.length = 0;
-  notesTab.click();
-  ok(view.mode === 'notes', '点击笔记进入笔记模式');
-  const notesTabAfter = findButton(view.contentEl, '笔记');
-  const tableTabAfter = findButton(view.contentEl, '表格');
-  ok(
-    notesTabAfter.hasClass('xsv-mode-tab-active') && !tableTabAfter.hasClass('xsv-mode-tab-active'),
-    '笔记模式选中态强化'
-  );
-  ok(notices.some((message) => message.indexOf('这里是笔记模式') >= 0), '首次切到空笔记模式给一次性提示');
-  findButton(view.contentEl, '表格').click();
-  findButton(view.contentEl, '笔记').click();
-  ok(
-    notices.filter((message) => message.indexOf('这里是笔记模式') >= 0).length === 1,
-    '一次性提示不重复'
-  );
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-mode-tab')).length, '不再渲染表格 / 笔记切换标签');
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-mode-tab-table')).length, '表格切换入口已移除');
+  ok(!findButton(view.contentEl, '表格'), '界面上没有「表格」按钮');
+  ok(!findButton(view.contentEl, '新增'), '界面上没有「新增」按钮');
 
   // 21a) 空态引导 + 示例表格按钮（不自动保存）
   const guide = findAll(view.contentEl, (el) => el.hasClass('xsv-note-guide'))[0];
@@ -1545,67 +1556,7 @@ try {
   findButton(view.contentEl, '保存笔记').click();
   await waitFor(() => plugin.notes[0].body.indexOf('| 名称 | 账号 | 密码 |') >= 0, '保存示例笔记');
 
-  // 21b) 条目内容按 Markdown 渲染；自引用降级为引用缺失
-  const apiKeyEntry = plugin.entries.filter((entry) => entry.name === 'API Key')[0];
-  ok(!!apiKeyEntry, '找到用于条目渲染的 API Key');
-  await plugin.updateEntry(apiKeyEntry.id, {
-    name: 'API Key',
-    type: 'api-key',
-    tags: [],
-    content: '| 字段 | 值 |\n| --- | --- |\n| 自引用 | {{API Key.密码}} |\n| 其它 | {{GitHub.密码}} |',
-    note: '',
-  });
-  view.mode = 'table';
-  view.revealed.add(apiKeyEntry.id);
-  view.render();
-  const entryContent = findAll(view.contentEl, (el) => el.hasClass('xsv-content'))[0];
-  ok(!!entryContent, '显示的条目内容区存在');
-  const entryTable = findAll(entryContent, (el) => el.tagName === 'TABLE')[0];
-  ok(!!entryTable && entryTable.hasClass('xsv-md-table'), '条目内容中的管道表格渲染为真实 table');
-  const selfMissing = findAll(entryContent, (el) => el.hasClass('xsv-ref-missing'));
-  ok(selfMissing.length === 1 && textOf(selfMissing[0]).indexOf('API Key') >= 0, '负向：自引用降级为引用缺失');
-  const selfNote = findAll(entryContent, (el) => el.hasClass('xsv-ref-selfnote'))[0];
-  ok(!!selfNote && textOf(selfNote).indexOf('不能引用自身') >= 0, '自引用给出灰色说明');
-  const entryRefButtons = findAll(entryContent, (el) => el.hasClass('xsv-ref'));
-  ok(
-    !entryRefButtons.some((el) => String(el.textContent).indexOf('API Key') >= 0),
-    '负向：自引用不生成可复制按钮'
-  );
-  ok(entryRefButtons.length === 1, '条目内容中的跨条目引用生成一个按钮');
-  const crossRef = entryRefButtons[0];
-  ok(!!crossRef && String(crossRef.textContent).indexOf('GitHub') >= 0, '条目内容可引用其它条目并掩码显示');
-  ok(String(textOf(entryContent)).indexOf(SECRET_TWO) < 0, '负向：条目引用值不进入 DOM 文本');
-  view.revealed.clear();
-
-  // 21c) 引用缺失可点击创建条目：取消路径 + 确认路径
-  await plugin.saveNote('note-primary', '{{Nope.密码}}');
-  view.mode = 'notes';
-  view.render();
-  const missingAction = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-missing-action'))[0];
-  ok(!!missingAction && missingAction.tagName === 'BUTTON', '引用缺失渲染为可点击元素');
-  const entryCountBefore = plugin.entries.length;
-  missingAction.click();
-  const confirmBar = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-create-confirm'))[0];
-  ok(!!confirmBar, '点击后出现创建确认条');
-  ok(textOf(confirmBar).indexOf('是否创建同名条目') >= 0 && textOf(confirmBar).indexOf('Nope') >= 0, '确认文案包含条目名');
-  ok(plugin.entries.length === entryCountBefore, '负向：确认前不自动创建条目');
-  findButton(confirmBar, '取消').click();
-  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-ref-create-confirm')).length, '取消后确认条消失');
-  ok(plugin.entries.length === entryCountBefore, '负向：取消后不创建条目');
-
-  findAll(view.contentEl, (el) => el.hasClass('xsv-ref-missing-action'))[0].click();
-  findButton(view.contentEl, '创建条目').click();
-  const openedModals = Array.from(plugin.openModals);
-  const refCreateModal = openedModals[openedModals.length - 1];
-  ok(!!refCreateModal, '确认后打开现有新增条目表单');
-  const refModalInputs = findAll(refCreateModal.contentEl, (el) => el.tagName === 'INPUT');
-  const refModalSelects = findAll(refCreateModal.contentEl, (el) => el.tagName === 'SELECT');
-  ok(refModalInputs[0] && refModalInputs[0].value === 'Nope', '新增表单预填条目名（去掉 .密码 字段）');
-  ok(refModalSelects[0] && refModalSelects[0].value === 'password', '新增表单按字段预填密码类型');
-  refCreateModal.close();
-  ok(plugin.entries.length === entryCountBefore, '负向：只打开表单，不静默写入');
-
-  // 21d) 示例插入不重复：已有内容先选择追加/替换
+  // 21b) 示例插入不重复：已有内容先选择追加/替换
   await plugin.saveNote('note-primary', '已有内容-EXISTING');
   view.render();
   findButton(view.contentEl, '编辑笔记').click();
@@ -1660,26 +1611,16 @@ try {
   view.render();
   findButton(view.contentEl, '取消编辑').click();
 
-  // 21f) 条目保存后的笔记提示只弹一次
-  notices.length = 0;
-  plugin.markdownHintShown = false;
-  ok(plugin.maybeHintNoteContent('普通密码 abc123') === false, '负向：普通内容不触发笔记提示');
-  ok(plugin.maybeHintNoteContent('| a | b |\n| --- | --- |\n| 1 | 2 |') === true, '管道表格内容触发提示');
-  ok(notices.some((message) => message.indexOf('笔记模式') >= 0), '提示文案指向笔记模式');
-  ok(plugin.maybeHintNoteContent('{{GitHub.密码}}') === false, '负向：同一会话不重复提示');
-  ok(notices.filter((message) => message.indexOf('笔记模式') >= 0).length === 1, '提示只弹一次');
-  plugin.markdownHintShown = false;
-  ok(plugin.maybeHintNoteContent('{{GitHub.密码}}') === true, '引用内容同样触发提示');
+  // 21c) 0.3.0 已移除「引用缺失 → 创建条目」与「条目保存笔记提示」
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-ref-missing-action')).length, '引用缺失不再提供创建入口');
+  ok(typeof plugin.maybeHintNoteContent === 'undefined', '条目保存的笔记提示已随条目 UI 移除');
 
-  // 21g) 锁定后新增的引用/示例状态一并清空
-  view.mode = 'notes';
+  // 21d) 锁定后草稿与示例选择一并清空
   view.noteEditing = true;
   view.noteDraft = '示例草稿-DRAFT-MARKER';
-  view.pendingRefCreate = { name: 'Nope', field: '密码' };
   view.render();
   plugin.lock();
-  ok(view.noteEditing === false && view.noteDraft === null, '锁定后草稿被丢弃（0.2.1）');
-  ok(view.pendingRefCreate === null, '锁定后待创建引用状态被清空');
+  ok(view.noteEditing === false && view.noteDraft === null, '锁定后草稿被丢弃');
   ok(String(textOf(view.contentEl)).indexOf('DRAFT-MARKER') < 0, '锁定后不残留示例草稿');
   ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-sample-choice')).length, '锁定后追加/替换选择条被移除');
 
@@ -1692,10 +1633,115 @@ try {
   plugin.cryptoApi = savedCrypto;
   view.render();
 
-  // 收尾断言：命令与视图存在
-  ok(plugin.__commands.length === 3, '注册了 3 条命令');
-  ok(plugin.__viewFactories['xu-secret-vault-view'] !== undefined, '注册了侧边栏视图');
-  ok(plugin.__settingTab !== null, '注册了设置页');
+  // 23) 整页视图单实例：已存在整页标签时只聚焦，不新建第二个面板
+  const pageLeaves = () =>
+    leaves.filter(
+      (item) => item.view && typeof item.view.getViewType === 'function' && item.view.getViewType() === 'xu-secret-vault-page'
+    );
+  ok(pageLeaves().length === 1, '当前只有一个整页标签');
+  const firstOpen = await plugin.openVaultView();
+  ok(firstOpen === pageLeaves()[0], '再次打开聚焦已有整页标签');
+  const secondOpen = await plugin.openVaultView();
+  ok(pageLeaves().length === 1, '连续打开两次仍只有一个整页标签');
+  ok(secondOpen === pageLeaves()[0], '不会新建重复面板');
+
+  // 24) 单元格即复制单元
+  ok((await plugin.unlock(MASTER)) === true, '解锁以测试表格单元格');
+  const TABLE_NOTE = [
+    '| 名称 | 账号 | 密码 | 链接 | 备注 |',
+    '| :--- | :--- | :--- | :--- | :--- |',
+    '| GitHub | {{GitHub.密码}} | CELL-COPY-VALUE | [官网](https://example.com) |  |',
+    '| 裸链 | https://example.org/bare |  |  |  |',
+  ].join('\n');
+  await plugin.saveNote('note-primary', TABLE_NOTE);
+  view.render();
+
+  const cellTable = findAll(view.contentEl, (el) => el.tagName === 'TABLE' && el.hasClass('xsv-md-table'))[0];
+  ok(!!cellTable && cellTable.parent && cellTable.parent.hasClass('xsv-table-wrap'), '表格外层提供横向滚动容器');
+  const heads = findAll(cellTable, (el) => el.tagName === 'TH');
+  ok(heads.length === 5, '表头 5 列');
+  ok(!heads.some((el) => el.hasClass('xsv-cell-copy')), '表头单元格不参与复制（无点击类）');
+  const cells = findAll(cellTable, (el) => el.tagName === 'TD');
+  ok(cells.length === 10, '两行各 5 个单元格');
+  ok(cells.filter((el) => el.hasClass('xsv-cell-copy')).length === 6, '仅非空数据单元格可点击复制');
+  ok(String(textOf(cellTable)).indexOf('CELL-COPY-VALUE') >= 0, '单元格文本默认可见（不做掩码）');
+
+  const cellByText = (needle) => cells.filter((el) => String(textOf(el)).indexOf(needle) >= 0)[0];
+  const copyCell = cellByText('CELL-COPY-VALUE');
+  clipboard = '';
+  notices.length = 0;
+  copyCell.click();
+  await waitFor(() => clipboard === 'CELL-COPY-VALUE', '点击单元格复制');
+  ok(clipboard === 'CELL-COPY-VALUE', '点击单元格复制其文本');
+  await waitFor(() => notices.some((message) => message === '已复制'), '单元格复制提示');
+  ok(notices.some((message) => message === '已复制'), '单元格复制给出轻量「已复制」提示');
+  ok(plugin.clipboardTimer !== 0, '单元格复制沿用 30 秒自动清空定时器');
+
+  // 链接单元格：交给系统浏览器，不复制
+  clipboard = 'UNCHANGED-BEFORE-LINK';
+  notices.length = 0;
+  const openBefore = openCalls.length;
+  cellByText('官网').click();
+  await delay(20);
+  ok(
+    openCalls.length === openBefore + 1 && openCalls[openCalls.length - 1] === 'https://example.com',
+    '链接单元格点击打开系统浏览器'
+  );
+  ok(clipboard === 'UNCHANGED-BEFORE-LINK', '负向：链接单元格不复制文本');
+  ok(!notices.some((message) => message === '已复制'), '负向：链接单元格不弹复制提示');
+
+  clipboard = 'UNCHANGED-BEFORE-BARE';
+  cellByText('example.org').click();
+  await delay(20);
+  ok(openCalls[openCalls.length - 1] === 'https://example.org/bare', '裸 URL 单元格同样打开浏览器');
+  ok(clipboard === 'UNCHANGED-BEFORE-BARE', '负向：裸 URL 单元格不复制文本');
+
+  // 空单元格：不复制、不提示
+  clipboard = 'UNCHANGED-BEFORE-EMPTY';
+  notices.length = 0;
+  const emptyCell = cells.filter((el) => !el.hasClass('xsv-cell-copy') && String(textOf(el)).trim() === '')[0];
+  ok(!!emptyCell, '存在空单元格');
+  emptyCell.click();
+  await delay(20);
+  ok(clipboard === 'UNCHANGED-BEFORE-EMPTY', '负向：空单元格点击不复制');
+  ok(!notices.some((message) => message === '已复制'), '负向：空单元格点击不提示');
+
+  // 剪贴板不可用：明确提示，不静默
+  const savedClipboardWrite = navigator.clipboard.writeText;
+  navigator.clipboard.writeText = async () => {
+    throw new Error('clipboard denied');
+  };
+  notices.length = 0;
+  ok((await plugin.copySecret('CLIPBOARD-FAIL-PROBE')) === false, '复制失败时 copySecret 返回 false');
+  await waitFor(() => notices.some((message) => message.indexOf('剪贴板') >= 0), '剪贴板失败给出明确提示');
+  navigator.clipboard.writeText = savedClipboardWrite;
+  clipboard = '';
+
+  // 25) 条目 UI 下线后旧数据仍完整：entries 留在密文载荷，旧引用可解析
+  const cellRefs = findAll(view.contentEl, (el) => el.hasClass('xsv-ref'));
+  ok(cellRefs.length === 1, '条目 UI 下线后旧引用仍可解析（只读）');
+  clipboard = '';
+  cellRefs[0].click();
+  ok(clipboard === SECRET_ONE, '旧引用仍能复制条目值');
+
+  // 26) 锁定后整页无明文（表格单元格文本 / 草稿 / 表格节点）
+  view.noteEditing = true;
+  view.noteDraft = 'CELL-DRAFT-MARKER';
+  view.render();
+  ok(String(textOf(view.contentEl)).indexOf('CELL-DRAFT-MARKER') >= 0, '锁定前草稿可见（构造测试场景）');
+  plugin.lock();
+  const lockedPageText = String(textOf(view.contentEl));
+  ok(lockedPageText.indexOf('CELL-COPY-VALUE') < 0, '锁定后整页 DOM 不含表格单元格明文');
+  ok(lockedPageText.indexOf('CELL-DRAFT-MARKER') < 0, '锁定后整页 DOM 不含编辑草稿');
+  ok(!findAll(view.contentEl, (el) => el.tagName === 'TABLE').length, '锁定后表格节点被移除');
+  view.render();
+  ok(findAll(view.contentEl, (el) => el.hasClass('xsv-page-card')).length === 1, '锁定后整页回到居中的解锁卡片');
+
+  ok((await plugin.unlock(MASTER)) === true, '重新解锁');
+  view.render();
+  ok(plugin.entries.length === 3, '界面下线后 entries 仍完整保存在密文载荷中');
+  ok(String(textOf(view.contentEl)).indexOf('CELL-COPY-VALUE') >= 0, '重新解锁后笔记表格再次渲染');
+  plugin.lock();
 
   console.log('');
   console.log('CREATE_MS=' + createMs + '  UNLOCK_MS=' + unlockMs);
