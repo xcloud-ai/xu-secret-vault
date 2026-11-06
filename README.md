@@ -18,7 +18,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 界面只有笔记：整页标签中维护一篇加密笔记，可用 Markdown 手写账号表与说明，支持标题、列表、粗体、行内代码、管道表格、http/https 链接。
 - 表格单元格按**纯文本**显示与复制：不再解析 `{{条目.字段}}` 引用，也不做行内 Markdown；唯一例外是整格为 `[文字](http/https...)` 或裸 http/https URL 时渲染为可点链接。支持 `\|` 与 `\\` 转义，显示与复制都用还原后的值。
 - 单元格即复制单元：点击任意非空单元格直接复制其文本（免选中），给出「已复制」轻量提示，沿用 30 秒剪贴板自动清空；空单元格点击不做任何事。
-- 密文列自动识别：表头命中「列显示规则」的列显示为 `••••••`，旁边小眼睛按钮可临时显示，点击单元格复制真实值；规则可在设置页增删、切换明文/密文，改动立即重渲染。默认把密码、口令、password、pwd、token、secret、密钥、私钥按密文处理，名称、账号、网址、备注按明文。
+- 列显示规则默认是**空表**：所有单元格写什么显示什么、复制什么，不会因为列名叫「密码 / token」就自动遮挡。只有在设置里手动把列名设为「密文」的列才显示为 `••••••`，旁边小眼睛按钮可临时显示，点击单元格复制真实值；规则可在设置页增删、用下拉切换明文/密文，改动立即重渲染。
 - 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦**立即加遮罩并清屏**，但会话保留，倒计时结束才锁定（默认 30 秒，可选立即 / 5 / 10 / 30 / 60 / 120 秒）；倒计时内回到窗口自动解除遮罩，不要求重输主密码。后台超过 60 秒仍强制锁定。锁定时清空整页明文、编辑区、草稿、复制缓存并丢弃密钥。
 - 写盘采用「写唯一 `.tmp` → 读回解密比对 → 留 `.bak` → rename 原子替换 → 终检 → 删 `.bak`」；任一步失败都保留或回滚旧文件，启动时清理本插件遗留的 `*.tmp*`。检测到文件被外部修改时拒绝覆盖，并另存 `*.conflict-时间戳.enc` 副本，冲突后必须先「重新加载」才能继续编辑。
 - 倒计时结束、新开第二个面板等需要重新验证的场景，与解锁同等强度：重新付出完整 KDF 成本并解开会话挑战密文，不使用无盐哈希比对；连续错误复用同一套指数退避。
@@ -35,7 +35,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - The full UI is notes-only: one encrypted Markdown note per vault, with headings, lists, bold, inline code, pipe tables and http/https links.
 - Table cells are **literal text** for display and copy: `{{entry.field}}` references and inline Markdown are no longer parsed; the only exception is a whole cell that is `[label](http/https...)` or a bare http/https URL, which renders as a clickable link. `\|` and `\\` escapes are supported and unescaped for both display and copy.
 - Every non-empty cell is a copy unit: clicking it copies its text (no selection needed) with a lightweight "Copied" notice, reusing the 30-second clipboard clearing; empty cells do nothing.
-- Sensitive columns follow the configurable **column display rules**: matching headers show `••••••`, an eye button reveals temporarily, and clicking the cell copies the real value. Rules can be added, removed or switched between plain/secret in settings and re-render immediately. Defaults treat password, token, secret, key and their Chinese equivalents as secret, and name, account, URL and notes as plain.
+- Column display rules start as an **empty list**: every cell is shown and copied exactly as written, and nothing is masked just because a header says "password" or "token". Only columns you explicitly mark as "Secret" in settings render as `••••••`; an eye button reveals them temporarily, and clicking the cell copies the real value. Rules can be added, removed or switched between plain/secret with a dropdown, and re-render immediately.
 - Auto-lock after 15 minutes idle by default; backgrounding or losing window focus **masks and clears immediately**, but keeps the session and locks only when the countdown ends (default 30 seconds; immediate / 5 / 10 / 30 / 60 / 120). Returning within the countdown unmasks without the master password. More than 60 seconds in the background still forces a lock.
 - Writes use "write a unique .tmp, decrypt-verify, keep .bak, atomic rename, final verify, delete .bak"; any failure keeps or rolls back the old file, and stale `*.tmp*` files are cleaned at startup. External modifications are never overwritten and are saved as a `*.conflict-<timestamp>.enc` copy, which requires "Reload" before editing continues.
 - Re-verification (after the countdown ends or when opening a second panel) costs a full KDF derivation and decrypts an in-session challenge ciphertext; it never compares an unsalted hash, and repeated failures reuse the same exponential backoff.
@@ -51,7 +51,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 渲染范围：标题、段落、无序/有序列表、粗体、行内代码、管道表格、链接。表格的 `:---` / `---:` / `:---:` 会按列渲染为左/右/居中；表格宽度自适应，过长时整页内容区提供横向滚动。
 - 单元格点击复制：表格中的**非空数据单元格**点击即复制该单元格文本，右下角弹出轻量「已复制」提示，并沿用 30 秒剪贴板自动清空。表头单元格不参与复制（点击无动作），空单元格点击也不复制、不提示。
 - 链接单元格：单元格内容整体是 `[文字](https://...)` 或裸 `http/https` URL 时，点击改用系统浏览器打开，不复制文本。
-- 密文列：表头命中「列显示规则」的列默认显示 `••••••`，旁边小眼睛临时显示，点击单元格复制真实值；遮罩、锁定、失焦时已临时显示的值立即回到掩码态。
+- 密文列（仅手动标记）：表头在「列显示规则」里被设为「密文」的列显示 `••••••`，旁边小眼睛临时显示，点击单元格复制真实值；遮罩、锁定、失焦时已临时显示的值立即回到掩码态。默认规则表为空，名为「密码」的列同样是明文，不做任何自动推断。
 - 剪贴板不可用时会明确提示「当前环境不支持剪贴板 API，无法自动复制」，不会静默失败。
 - 链接：仅 `http`/`https` 可点击；`javascript:`、`file://` 等其它 scheme 一律按纯文本显示。
 
@@ -103,11 +103,11 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 设置 → 密钥保险库 → 「列显示规则」：
 
-- 一行一条规则：**列名输入框** + **明文 / 密文** 分段按钮 + **删除按钮**；底部「添加自定义列名」（新增空行并自动聚焦）与「恢复默认」（二次确认，确认后才覆盖当前自定义规则）。
-- 预置规则：密文 = 密码、口令、password、pwd、token、secret、密钥、私钥；明文 = 名称、账号、网址、备注。
+- **默认是空表，全明文**：任何列都不做自动推断，写什么显示什么、复制什么；名为「密码」「token」的列同样明文。表格内容不做局部掩码，整体遮挡依靠失焦遮罩与锁定。
+- 一行一条规则：**列名输入框**（占主要宽度）+ **密文 / 明文 下拉框**（固定窄宽，当前值直接显示在框内）+ **删除按钮**（行尾）；底部「添加自定义列名」新增空行并自动聚焦，另有「清空全部规则（全明文）」（二次确认）。
 - 匹配优先级：精确匹配（大小写不敏感）> 列名包含规则名 > 未命中按明文。多条包含规则同时命中时，取最长的规则名。
 - 密文列行为：`••••••` 掩码、眼睛按钮临时显示、点击单元格复制真实值；遮罩/锁定/失焦时已显示的值立即回到掩码态。
-- 规则改动立即重新渲染当前笔记，不需要重启或重新解锁；表格下方会提示「本表 N 列按密码处理」。
+- 规则改动立即重新渲染当前笔记，不需要重启或重新解锁；有密文列时表格下方会提示「本表 N 列按密码处理」。
 
 两行示例（把「手机号」设为密文、「邮箱」设为明文）：
 
@@ -116,7 +116,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 | 手机号 | 密文 |
 | 邮箱 | 明文 |
 
-添加一条自定义规则的完整步骤：点「添加自定义列名」→ 在新行输入 `手机号` → 点该行的「密文」→ 输入框失焦/回车即保存，当前表格立即重渲染；若列名重复会合并为一条，空列名不会保存并给出提示。规则最多 50 行、单条列名最长 40 个字符；`data.json` 只存 `[{ name, mode }]`，绝不保存任何密码、示例值或笔记内容。
+添加一条自定义规则的完整步骤：点「添加自定义列名」→ 在新行输入 `手机号` → 在右侧下拉框选「密文」→ 输入框失焦/回车即保存，当前表格立即重渲染；若列名重复会合并为一条，空列名不会保存并给出提示。规则最多 50 行、单条列名最长 40 个字符；`data.json` 只存 `[{ name, mode }]`，绝不保存任何密码、示例值或笔记内容。升级前已有的自定义规则会保留并继续生效，不会被清空。
 
 ### 整页视图怎么打开
 
@@ -136,7 +136,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ### 方式一：从 Obsidian 社区目录安装
 
-当前版本 0.3.1 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
+当前版本 0.3.2 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
 
 ### 方式二：手动安装
 
@@ -157,7 +157,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 1. 点击左侧功能区的锁图标，或按 `Cmd/Ctrl+P` 执行「打开密钥保险库」。
 2. 首次使用：在整页的居中卡片中输入两次主密码，点击「创建保险库」。主密码不会写入磁盘，忘记后无法恢复。
 3. 解锁后进入宽内容区：上方是笔记列表，下方是笔记渲染区。点击「编辑笔记」直接写 Markdown 账号表与说明，点击「保存笔记」落盘。
-4. 表格里每个非空单元格都能点击复制；单元格若是链接则改为打开浏览器。密文列默认显示 `••••••`，眼睛按钮临时显示，点击单元格复制真实值；沿用 30 秒剪贴板自动清空。
+4. 表格里每个非空单元格都能点击复制；单元格若是链接则改为打开浏览器。默认全部按原文显示，不会自动遮挡；手动在设置里标为「密文」的列才显示 `••••••`，眼睛按钮临时显示，点击单元格复制真实值；沿用 30 秒剪贴板自动清空。
 5. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，倒计时内回来自动恢复，倒计时结束或后台超过 60 秒则锁定。
 
 ### 首次使用
@@ -176,7 +176,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 | 保险库文件路径 | `xu-secrets.enc` | 相对 vault 根目录；必须以 `.enc` 结尾，缺失时自动补全。 |
 | 自动锁定（分钟） | 15 | 无操作超过该时长后自动锁定并清除内存明文；切后台超过 60 秒也会锁定。 |
 | 失焦锁定倒计时 | 30 秒 | 失焦立即遮罩；可选立即 / 5 / 10 / 30 / 60 / 120 秒。倒计时内返回自动恢复，归零则锁定。 |
-| 列显示规则 | 8 条密文 + 4 条明文 | 按表头决定明文或密文，支持增删、切换与恢复默认；改动立即生效。 |
+| 列显示规则 | 空（全明文） | 只有手动设为「密文」的列才遮挡；用下拉切换明文/密文，支持增删与清空全部规则（二次确认）；改动立即生效。 |
 | 剪贴板清空（秒） | 30 | 复制密钥后自动清空剪贴板；剪贴板已被替换时不会覆盖。 |
 | 立即锁定 | — | 清除内存中的密钥与明文，需要重新输入主密码。 |
 
@@ -227,6 +227,15 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 备份方式就是复制 `xu-secrets.enc` 这个密文文件本身；不需要也不应该导出明文。恢复时把该文件放回原路径即可。
 
 ## 版本记录
+
+### 0.3.2
+
+- 列显示规则改为「默认全明文」：不再按列名（密码、口令、password、token 等）自动推断，任何表格单元格写什么显示什么、复制什么；只有设置中手动把列名设为「密文」的列才遮挡。
+- 移除预置的 8 条密文与 4 条明文规则，默认规则表为空；「恢复默认」改为「清空全部规则（全明文）」，仍需二次确认。升级前已有的自定义规则保留并继续生效。
+- 设置页每行的明文/密文控件由分段按钮改为**下拉框**：当前值直接显示在框内，切换即时生效。原分段按钮的选中态只靠 `.xsv-seg-btn-active` 的背景色，而 Obsidian 设置页的 `button:not(.clickable-icon)` 规则优先级更高（0,1,1 vs 0,1,0），把背景色覆盖成统一灰色，导致两个按钮外观完全相同、点击后看不出状态变化；下拉框不再依赖选中态样式，因此一定有可见反馈。
+- 行布局：列名输入占主要宽度并允许收缩，下拉固定 96px 窄宽，删除按钮在行尾，窄屏不换行错位。
+- 示例表格默认全部明文，并在表下说明「只有把列名加进设置并选密文才会遮挡」。
+- 测试增至 523 条断言：原 493 条中「密码列自动密文」的断言改写为默认全明文断言（不删除测试意图），新增手动标密文后遮挡与复制真值、下拉默认值、切换即时重渲染、重绘后下拉值保持、连续添加两行各自独立、删除行后其余值保持、旧 `data.json` 自定义规则保留等覆盖。
 
 ### 0.3.1
 

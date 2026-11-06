@@ -1,4 +1,4 @@
-/* XU Secret Vault 0.3.1 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
+/* XU Secret Vault 0.3.2 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
 'use strict';
 
 const fs = require('fs');
@@ -519,7 +519,7 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.3.1',
+    version: '0.3.2',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
@@ -1452,17 +1452,16 @@ try {
     '表格中的明文值照常显示'
   );
   ok(
-    findAll(mdTables[0], (el) => el.hasClass('xsv-cell-secret')).length === 2,
-    '密码列两个单元格按密文列渲染'
+    findAll(mdTables[0], (el) => el.hasClass('xsv-cell-secret')).length === 0,
+    '默认全明文：名为「密码」的列也不自动遮挡'
   );
   ok(
-    textOf(mdTables[0]).indexOf('LITERAL-SECRET-CELL') < 0,
-    '负向：密文列不把真实值写进 DOM'
+    textOf(mdTables[0]).indexOf('LITERAL-SECRET-CELL') >= 0,
+    '密码列的真实值默认直接显示'
   );
   ok(
-    findAll(view.contentEl, (el) => el.hasClass('xsv-sensitive-note')).length === 1 &&
-      textOf(findAll(view.contentEl, (el) => el.hasClass('xsv-sensitive-note'))[0]).indexOf('1 列') >= 0,
-    '表格下方说明哪些列按密码处理'
+    findAll(view.contentEl, (el) => el.hasClass('xsv-sensitive-note')).length === 0,
+    '负向：默认不出现「本表 N 列按密码处理」说明行'
   );
 
   // 20e) 0.3.1 字面文本：{{...}} 不再解析，按源码原样显示
@@ -1589,21 +1588,28 @@ try {
       sampleEditor.value.indexOf('[aliyun.com](https://console.aliyun.com)') >= 0,
     '示例网址列使用可点链接'
   );
+  ok(
+    sampleEditor.value.indexOf('只有把列名加进') >= 0,
+    '示例表下说明默认不遮挡、只有手动设为密文才遮挡'
+  );
   ok(plugin.notes[0].body === '', '负向：示例插入不自动保存');
   findButton(view.contentEl, '保存笔记').click();
   await waitFor(() => plugin.notes[0].body.indexOf('| 名称 | 账号 | 密码 | 网址 |') >= 0, '保存示例笔记');
   view.render();
   const sampleTable = findAll(view.contentEl, (el) => el.tagName === 'TABLE')[0];
-  const sampleSecretCells = findAll(sampleTable, (el) => el.hasClass('xsv-cell-secret'));
-  ok(sampleSecretCells.length === 2, '示例的密码列插入后按密文列渲染');
-  const sampleEye = findAll(sampleSecretCells[0], (el) => el.tagName === 'BUTTON')[0];
-  sampleEye.click();
+  const sampleCells = findAll(sampleTable, (el) => el.tagName === 'TD');
+  ok(sampleCells.length === 8, '示例渲染两行四列共 8 个单元格');
   ok(
-    textOf(sampleSecretCells[0]).indexOf('p@ss|w0rd*_2026') >= 0,
+    findAll(sampleTable, (el) => el.hasClass('xsv-cell-secret')).length === 0,
+    '示例默认全明文：密码列不遮挡'
+  );
+  ok(
+    textOf(sampleTable).indexOf('p@ss|w0rd*_2026') >= 0,
     '示例密码的 \\| 转义在渲染时还原为 |，且 * _ 原样显示'
   );
+  const samplePasswordCell = sampleCells.filter((el) => textOf(el).indexOf('p@ss|w0rd*_2026') >= 0)[0];
   clipboard = '';
-  sampleSecretCells[0].click();
+  samplePasswordCell.click();
   await waitFor(() => clipboard === 'p@ss|w0rd*_2026', '示例密码点击复制');
   ok(clipboard === 'p@ss|w0rd*_2026', '示例密码复制逐字一致');
   const sampleAnchors = findAll(sampleTable, (el) => el.tagName === 'A');
@@ -1717,22 +1723,26 @@ try {
   await plugin.saveNote('note-primary', TABLE_NOTE);
   view.render();
 
-  const cellTable = findAll(view.contentEl, (el) => el.tagName === 'TABLE' && el.hasClass('xsv-md-table'))[0];
+  let cellTable = findAll(view.contentEl, (el) => el.tagName === 'TABLE' && el.hasClass('xsv-md-table'))[0];
   ok(!!cellTable && cellTable.parent && cellTable.parent.hasClass('xsv-table-wrap'), '表格外层提供横向滚动容器');
   const heads = findAll(cellTable, (el) => el.tagName === 'TH');
   ok(heads.length === 5, '表头 5 列');
   ok(!heads.some((el) => el.hasClass('xsv-cell-copy')), '表头单元格不参与复制（无点击类）');
-  const cells = findAll(cellTable, (el) => el.tagName === 'TD');
+  let cells = findAll(cellTable, (el) => el.tagName === 'TD');
   ok(cells.length === 10, '两行各 5 个单元格');
-  ok(cells.filter((el) => el.hasClass('xsv-cell-copy')).length === 9, '非空数据单元格（含密文列）可点击复制');
+  ok(cells.filter((el) => el.hasClass('xsv-cell-copy')).length === 9, '非空数据单元格都可点击复制');
   ok(String(textOf(cellTable)).indexOf('CELL-COPY-VALUE') >= 0, '明文列文本默认可见');
   ok(
-    findAll(cellTable, (el) => el.hasClass('xsv-cell-secret')).length === 2,
-    '密码列两个单元格按密文列渲染'
+    findAll(cellTable, (el) => el.hasClass('xsv-cell-secret')).length === 0,
+    '默认全明文：名为「密码」的列也不遮挡'
   );
   ok(
-    textOf(findAll(view.contentEl, (el) => el.hasClass('xsv-sensitive-note'))[0]).indexOf('1 列') >= 0,
-    '表格下方说明 1 列按密码处理'
+    textOf(cellTable).indexOf(SECRET_ESCAPE_VALUE) >= 0,
+    '密码列真实值默认直接显示'
+  );
+  ok(
+    findAll(view.contentEl, (el) => el.hasClass('xsv-sensitive-note')).length === 0,
+    '负向：默认不出现按密码处理说明行'
   );
 
   const cellByText = (needle) => cells.filter((el) => String(textOf(el)).indexOf(needle) >= 0)[0];
@@ -1761,7 +1771,18 @@ try {
   await waitFor(() => clipboard === BACKSLASH_VALUE, '反斜杠单元格复制');
   ok(clipboard === BACKSLASH_VALUE, '反斜杠单元格复制逐字一致');
 
-  // 密文列：默认掩码、眼睛临时显示、点击复制真实值
+  // 唯一触发条件：用户手动把「密码」标为密文；规则变更会重渲染，需要重新查询节点
+  await plugin.saveColumnRules([{ name: '密码', mode: 'secret' }]);
+  cellTable = findAll(view.contentEl, (el) => el.tagName === 'TABLE' && el.hasClass('xsv-md-table'))[0];
+  cells = findAll(cellTable, (el) => el.tagName === 'TD');
+  ok(
+    findAll(cellTable, (el) => el.hasClass('xsv-cell-secret')).length === 2,
+    '手动把「密码」标为密文后该列遮挡'
+  );
+  ok(
+    textOf(findAll(view.contentEl, (el) => el.hasClass('xsv-sensitive-note'))[0]).indexOf('1 列') >= 0,
+    '手动标记后表格下方说明 1 列按密码处理'
+  );
   const secretCell = cells.filter((el) => el.hasClass('xsv-cell-secret'))[0];
   ok(String(textOf(secretCell)).trim().indexOf('••••••') === 0, '密文列默认显示掩码');
   ok(textOf(cellTable).indexOf(SECRET_ESCAPE_VALUE) < 0, '负向：密文真实值不在 DOM 文本中');
@@ -1770,12 +1791,13 @@ try {
   eyeButton.click();
   ok(textOf(secretCell).indexOf(SECRET_ESCAPE_VALUE) >= 0, '眼睛按钮临时显示真实值');
   eyeButton.click();
-  ok(textOf(secretCell).trim().indexOf('••••••') === 0, '再次点击眼睛回到掩码');
+  ok(String(textOf(secretCell)).trim().indexOf('••••••') === 0, '再次点击眼睛回到掩码');
   clipboard = '';
   notices.length = 0;
   secretCell.click();
   await waitFor(() => clipboard === SECRET_ESCAPE_VALUE, '点击密文单元格复制真实值');
   ok(clipboard === SECRET_ESCAPE_VALUE, '密文单元格点击复制真实值（逐字一致）');
+  await waitFor(() => notices.some((message) => message === '已复制'), '密文单元格复制提示');
   ok(notices.some((message) => message === '已复制'), '密文单元格复制给出「已复制」提示');
 
   // 链接单元格：交给系统浏览器，不复制
@@ -1860,10 +1882,18 @@ try {
   ok(plugin.entries.length === 3, '界面下线后 entries 仍完整保存在密文载荷中');
   ok(String(textOf(view.contentEl)).indexOf('CELL-COPY-VALUE') >= 0, '重新解锁后笔记表格再次渲染');
 
-  // 27) 列显示规则：精确 > 包含 > 明文；增删改立即生效；恢复默认需二次确认
-  ok(plugin.getColumnMode('密码') === 'secret', '默认规则：密码列按密文');
-  ok(plugin.getColumnMode('账号') === 'plain', '默认规则：账号列按明文');
+  // 27) 列显示规则：默认空表全明文；只有手动标记才遮挡；增删改立即生效；清空需二次确认
+  await plugin.saveColumnRules([]);
+  view.render();
+  ok(plugin.getColumnRules().length === 0, '默认规则为空（不做任何按列名推断）');
+  ok(plugin.getColumnMode('密码') === 'plain', '默认全明文：名为「密码」的列也是明文');
+  ok(plugin.getColumnMode('账号') === 'plain', '默认全明文：账号列按明文');
+  ok(plugin.getColumnMode('token') === 'plain', '默认全明文：旧的 token 关键词不再触发遮挡');
   ok(plugin.getColumnMode('手机号') === 'plain', '未命中规则按明文');
+  ok(
+    findAll(view.contentEl, (el) => el.hasClass('xsv-cell-secret')).length === 0,
+    '无规则时表格全部按明文渲染'
+  );
 
   const dirtyRules = [
     '密码',
@@ -1950,98 +1980,187 @@ try {
   ok(overflowRule.ok === false && overflowRule.reason === 'limit', '负向：超过 50 行拒绝新增');
   ok(notices.some((message) => message.indexOf('最多 50 条') >= 0), '行数上限给出提示');
 
-  // 恢复默认：二次确认，取消不清空，确认后回到预置规则
+  // 清空全部规则：二次确认，取消不清空，确认后回到全明文（默认规则为空表）
   const restoreModal = plugin.requestRestoreDefaultColumnRules();
-  ok(!!restoreModal && restoreModal.isOpen === true, '恢复默认弹出二次确认');
+  ok(!!restoreModal && restoreModal.isOpen === true, '清空全部规则弹出二次确认');
   ok(
-    textOf(restoreModal.contentEl).indexOf('会被覆盖') >= 0,
-    '二次确认说明当前规则会被覆盖'
+    textOf(restoreModal.contentEl).indexOf('所有列都按明文显示') >= 0,
+    '二次确认说明清空后所有列按明文显示'
   );
   findButton(restoreModal.contentEl, '取消').click();
-  ok(plugin.getColumnRules().length === 50, '取消恢复后自定义规则保持不变');
+  ok(plugin.getColumnRules().length === 50, '取消清空后自定义规则保持不变');
   const confirmModal = plugin.requestRestoreDefaultColumnRules();
-  findButton(confirmModal.contentEl, '恢复默认').click();
-  await waitFor(() => plugin.getColumnRules().length === 12, '确认恢复默认规则');
-  const defaults = plugin.getColumnRules();
-  ok(
-    defaults.filter((rule) => rule.mode === 'secret').length === 8 &&
-      defaults.filter((rule) => rule.mode === 'plain').length === 4,
-    '默认规则为 8 条密文 + 4 条明文'
-  );
-  ok(
-    defaults.some((rule) => rule.name === '密码' && rule.mode === 'secret') &&
-      defaults.some((rule) => rule.name === '网址' && rule.mode === 'plain'),
-    '默认规则清单包含密码与网址'
-  );
+  findButton(confirmModal.contentEl, '清空全部规则（全明文）').click();
+  await waitFor(() => plugin.getColumnRules().length === 0, '确认清空全部规则');
+  ok(plugin.getColumnRules().length === 0, '确认后规则表为空（全明文）');
+  ok(plugin.getColumnMode('密码') === 'plain', '清空后名为密码的列同样按明文');
   await waitFor(
-    () => notices.some((message) => message.indexOf('已恢复默认') >= 0),
-    '恢复默认提示'
+    () => notices.some((message) => message.indexOf('已清空全部规则') >= 0),
+    '清空规则提示'
   );
-  ok(notices.some((message) => message.indexOf('已恢复默认') >= 0), '恢复默认给出提示');
+  ok(notices.some((message) => message.indexOf('已清空全部规则') >= 0), '清空规则给出提示');
 
-  // 设置页规则表 UI：动态行、添加后聚焦、切换模式、删除、空列名提示
+  // 设置页规则表 UI：下拉控件、动态行、添加后聚焦、切换即时生效、删除、空列名提示
   const ruleHost = makeEl('div');
   plugin.settingTab.renderColumnRulesEditor({ settingEl: ruleHost });
-  const ruleRows = findAll(ruleHost, (el) => el.hasClass('xsv-rule-row'));
-  ok(ruleRows.length === 12, '规则表渲染默认 12 行');
-  const firstRuleInput = findAll(ruleRows[0], (el) => el.tagName === 'INPUT')[0];
-  ok(firstRuleInput && firstRuleInput.value === '密码', '规则行显示列名输入框');
   ok(
-    findButton(ruleRows[0], '密文') && findButton(ruleRows[0], '明文'),
-    '每行提供明文/密文分段按钮'
+    findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).length === 0,
+    '规则表默认渲染 0 行（全明文）'
   );
+  const rowsNow = () => findAll(ruleHost, (el) => el.hasClass('xsv-rule-row'));
+  const rowInput = (row) => findAll(row, (el) => el.tagName === 'INPUT')[0];
+  const rowSelect = (row) => findAll(row, (el) => el.tagName === 'SELECT')[0];
+
   findButton(ruleHost, '添加自定义列名').click();
+  let rows = rowsNow();
+  ok(rows.length === 1, '添加后出现一行');
+  const firstRow = rows[0];
+  ok(!!rowInput(firstRow) && rowInput(firstRow).value === '', '新增行显示空列名输入框');
+  const draftSelect = rowSelect(firstRow);
+  ok(!!draftSelect && draftSelect.hasClass('xsv-rule-select'), '每行提供下拉选择控件');
+  ok(draftSelect.value === 'plain', '下拉默认值为明文');
   ok(
-    findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).length === 13,
-    '添加后出现空行'
+    findAll(draftSelect, (el) => el.tagName === 'OPTION').length === 2,
+    '下拉固定两个选项'
   );
-  let draftRow = findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).pop();
-  findButton(draftRow, '密文').click();
-  draftRow = findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).pop();
-  const draftInput = findAll(draftRow, (el) => el.tagName === 'INPUT')[0];
-  draftInput.value = '手机号';
-  draftInput.fire('change');
+  ok(
+    findAll(draftSelect, (el) => el.tagName === 'OPTION').some((el) => el.value === 'secret') &&
+      findAll(draftSelect, (el) => el.tagName === 'OPTION').some((el) => el.value === 'plain'),
+    '下拉选项为明文 / 密文'
+  );
+  const styleSource = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+  ok(
+    styleSource.indexOf('.xsv-rule-row .xsv-rule-select') >= 0 &&
+      styleSource.indexOf('width: 96px') >= 0,
+    '下拉固定窄宽（96px），窄屏下不被挤压隐藏'
+  );
+  draftSelect.value = 'secret';
+  draftSelect.fire('change');
+  ok(plugin.getColumnRules().length === 0, '草稿行切换模式不落盘');
+  rowInput(firstRow).value = '手机号';
+  rowInput(firstRow).fire('change');
   await waitFor(() => plugin.getColumnMode('手机号') === 'secret', '设置页新增规则保存');
   await delay(30);
   ok(plugin.getColumnMode('手机号') === 'secret', '设置页新增规则立即生效');
-  ok(
-    findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).length === 13,
-    '新增规则后行数增加'
-  );
-  let lastRow = findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).pop();
-  findButton(lastRow, '×').click();
-  await waitFor(() => plugin.getColumnRules().length === 12, '设置页删除规则');
-  await delay(30);
-  ok(plugin.getColumnMode('手机号') === 'plain', '删除后自定义规则失效');
-  const nameRow = findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).filter((row) => {
-    const input = findAll(row, (el) => el.tagName === 'INPUT')[0];
-    return input && input.value === '名称';
-  })[0];
-  findButton(nameRow, '密文').click();
-  await waitFor(() => plugin.getColumnMode('名称') === 'secret', '设置页切换为密文');
-  await delay(30);
-  ok(plugin.getColumnMode('名称') === 'secret', '设置页切换模式立即生效');
-  const nameRowAfter = findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).filter((row) => {
-    const input = findAll(row, (el) => el.tagName === 'INPUT')[0];
-    return input && input.value === '名称';
-  })[0];
-  findButton(nameRowAfter, '明文').click();
-  await waitFor(() => plugin.getColumnMode('名称') === 'plain', '设置页切回明文');
-  await delay(30);
+  rows = rowsNow();
+  ok(rows.length === 1, '新增规则后行数增加');
+  ok(rowSelect(rows[0]).value === 'secret', '重绘后下拉值不丢失');
+
+  // 连续添加第二行：两行各自独立
   findButton(ruleHost, '添加自定义列名').click();
-  const emptyDraftInput = findAll(
-    findAll(ruleHost, (el) => el.hasClass('xsv-rule-row')).pop(),
-    (el) => el.tagName === 'INPUT'
-  )[0];
+  rows = rowsNow();
+  ok(rows.length === 2, '可重复添加多行');
+  ok(rowSelect(rows[1]).value === 'plain', '第二行下拉默认明文，与第一行独立');
+  rowInput(rows[1]).value = '邮箱';
+  rowInput(rows[1]).fire('change');
+  await waitFor(() => plugin.getColumnRules().length === 2, '第二行新增保存');
+  await delay(30);
+  rows = rowsNow();
+  ok(plugin.getColumnRules().length === 2, '两行规则各自独立落盘');
+  ok(
+    rowInput(rows[0]).value === '手机号' && rowSelect(rows[0]).value === 'secret' &&
+      rowInput(rows[1]).value === '邮箱' && rowSelect(rows[1]).value === 'plain',
+    '两行的列名与模式互不影响'
+  );
+
+  // 下拉切换：立即生效并重渲染当前笔记
+  rowSelect(rows[0]).value = 'plain';
+  rowSelect(rows[0]).fire('change');
+  await waitFor(() => plugin.getColumnMode('手机号') === 'plain', '设置页下拉切换为明文');
+  await delay(30);
+  rows = rowsNow();
+  ok(plugin.getColumnMode('手机号') === 'plain', '下拉切换模式立即生效');
+  ok(rowSelect(rows[0]).value === 'plain', '切换后下拉值更新');
+  ok(
+    rowInput(rows[1]).value === '邮箱' && rowSelect(rows[1]).value === 'plain',
+    '切换第一行不影响第二行'
+  );
+  rowSelect(rows[0]).value = 'secret';
+  rowSelect(rows[0]).fire('change');
+  await waitFor(() => plugin.getColumnMode('手机号') === 'secret', '设置页下拉切回密文');
+  await delay(30);
+  ok(plugin.getColumnMode('手机号') === 'secret', '下拉可来回切换');
+  ok(
+    findAll(view.contentEl, (el) => el.hasClass('xsv-cell-secret')).length === 2,
+    '下拉切换后当前笔记表格即时重渲染'
+  );
+
+  // 删除行后其余行值保持
+  rows = rowsNow();
+  findButton(rows[0], '×').click();
+  await waitFor(() => plugin.getColumnRules().length === 1, '设置页删除规则');
+  await delay(30);
+  rows = rowsNow();
+  ok(plugin.getColumnMode('手机号') === 'plain', '删除后自定义规则失效');
+  ok(rows.length === 1, '删除一行后剩余一行');
+  ok(
+    rowInput(rows[0]).value === '邮箱' && rowSelect(rows[0]).value === 'plain',
+    '删除后其余行的列名与下拉值保持'
+  );
+  rowSelect(rows[0]).value = 'secret';
+  rowSelect(rows[0]).fire('change');
+  await waitFor(() => plugin.getColumnMode('邮箱') === 'secret', '剩余行切换为密文');
+  await delay(30);
+
+  // 空列名拒绝：新增空行不输入直接提交
+  findButton(ruleHost, '添加自定义列名').click();
+  rows = rowsNow();
   notices.length = 0;
-  emptyDraftInput.fire('change');
+  rowInput(rows[rows.length - 1]).fire('change');
   ok(notices.some((message) => message.indexOf('不能为空') >= 0), '设置页空列名给出提示');
-  ok(plugin.getColumnRules().length === 12, '设置页空列名不落盘');
+  ok(plugin.getColumnRules().length === 1, '设置页空列名不落盘');
+  rows = rowsNow();
+  ok(rows.length === 1, '空列名草稿被丢弃');
+
+  // 旧 data.json 已有自定义规则：升级后保留并继续生效；未标记的列仍按明文
+  const settingsBackup = JSON.parse(JSON.stringify(plugin.settings));
+  const originalLoadData = plugin.loadData;
+  plugin.loadData = async () => ({
+    language: 'zh',
+    vaultPath: VAULT_PATH,
+    columnRules: [
+      { name: '密码', mode: 'secret' },
+      { name: '口令', mode: 'secret' },
+      { name: 'password', mode: 'secret' },
+      { name: 'pwd', mode: 'secret' },
+      { name: 'token', mode: 'secret' },
+      { name: 'secret', mode: 'secret' },
+      { name: '密钥', mode: 'secret' },
+      { name: '私钥', mode: 'secret' },
+      { name: '名称', mode: 'plain' },
+      { name: '账号', mode: 'plain' },
+      { name: '网址', mode: 'plain' },
+      { name: '备注', mode: 'plain' },
+    ],
+  });
+  await plugin.loadSettings();
+  ok(plugin.getColumnRules().length === 0, '旧版 0.3.1 预置 12 条规则升级后视为未自定义并清空');
+  ok(plugin.getColumnMode('密码') === 'plain', '升级后名为密码的列默认明文');
+  plugin.loadData = async () => ({
+    language: 'zh',
+    vaultPath: VAULT_PATH,
+    columnRules: [
+      { name: '手机号', mode: 'secret' },
+      { name: '账号', mode: 'plain' },
+    ],
+    obsoleteField: 'legacy',
+  });
+  await plugin.loadSettings();
+  ok(plugin.getColumnMode('手机号') === 'secret', '旧 data.json 的自定义规则升级后仍生效');
+  ok(plugin.getColumnMode('密码') === 'plain', '旧 data.json 未标记的密码列仍按明文');
+  ok(plugin.getColumnRules().length === 2, '旧 data.json 的规则表归一化后保留 2 条');
+  plugin.loadData = originalLoadData;
+  plugin.settings = settingsBackup;
 
   // data.json 只存 name/mode，不含任何密码或笔记内容
   await plugin.saveSettings();
   const rulesDump = JSON.stringify(plugin.__savedData);
-  ok(rulesDump.indexOf('columnRules') >= 0 && rulesDump.indexOf('"mode"') >= 0, 'data.json 持久化列显示规则');
+  ok(
+    rulesDump.indexOf('columnRules') >= 0 &&
+      rulesDump.indexOf('"name":"邮箱"') >= 0 &&
+      rulesDump.indexOf('"mode":"secret"') >= 0,
+    'data.json 只持久化 name/mode 形式的列显示规则'
+  );
   ok(
     rulesDump.indexOf(SECRET_ONE) < 0 &&
       rulesDump.indexOf(SECRET_TWO) < 0 &&

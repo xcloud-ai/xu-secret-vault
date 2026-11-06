@@ -27,8 +27,10 @@ const DEFAULT_BACKGROUND_LOCK_SECONDS = 30;
 const COLUMN_RULE_LIMIT = 50;
 const COLUMN_RULE_NAME_MAX = 40;
 const COLUMN_RULE_MODES = ['plain', 'secret'];
-// 列显示规则：精确匹配 > 包含匹配 > 未命中按明文；名字大小写不敏感
-const DEFAULT_COLUMN_RULES = [
+// 列显示规则默认是空表：不做任何按列名自动推断，所有单元格一律按原文显示。
+// 只有用户手动把某列设为「密文」才会遮挡；精确匹配 > 包含匹配 > 未命中按明文，名字大小写不敏感。
+// 0.3.1 的预置规则（8 密文 + 4 明文）：仅用于升级时识别，命中则视为未自定义并清空
+const LEGACY_DEFAULT_COLUMN_RULES = [
   { name: '密码', mode: 'secret' },
   { name: '口令', mode: 'secret' },
   { name: 'password', mode: 'secret' },
@@ -42,6 +44,15 @@ const DEFAULT_COLUMN_RULES = [
   { name: '网址', mode: 'plain' },
   { name: '备注', mode: 'plain' },
 ];
+
+function isLegacyDefaultColumnRules(rules) {
+  if (!Array.isArray(rules) || rules.length !== LEGACY_DEFAULT_COLUMN_RULES.length) return false;
+  const expected = new Map(LEGACY_DEFAULT_COLUMN_RULES.map((rule) => [rule.name.toLowerCase(), rule.mode]));
+  if (expected.size !== rules.length) return false;
+  return rules.every((rule) => expected.get(rule.name.toLowerCase()) === rule.mode);
+}
+
+const DEFAULT_COLUMN_RULES = [];
 const MASK_PLACEHOLDER = '••••••';
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 30000;
@@ -104,7 +115,7 @@ const I18N = {
     btn_sample_append: '追加到末尾',
     btn_sample_replace: '替换全文',
     note_guide_title: '从这里开始写账号表',
-    note_guide_desc: '笔记模式会像 Markdown 笔记一样渲染表格与链接；表格单元格按纯文本显示，不做行内 Markdown 或引用解析。点「插入示例表格」会把三列示例写进编辑器，不会自动保存。',
+    note_guide_desc: '笔记模式会像 Markdown 笔记一样渲染表格与链接；表格单元格按纯文本显示，不做行内 Markdown 或引用解析。点「插入示例表格」会把四列示例写进编辑器，不会自动保存；表格默认全部按原文显示，不自动遮挡。',
     notice_notes_mode_hint: '这里是笔记模式：可以像写 Markdown 一样维护账号表，保存后表格会渲染出来。',
     notice_note_content_hint: '这段看起来是笔记内容，笔记模式里会渲染成表格。',
     notice_cell_copied: '已复制',
@@ -170,16 +181,16 @@ const I18N = {
     setting_bg_lock_immediate: '立即（严格）',
     setting_bg_lock_seconds: '{n} 秒',
     setting_column_rules: '列显示规则',
-    setting_column_rules_desc: '按列名决定明文或密文。精确匹配优先，其次列名包含规则名，未命中按明文。密文列显示 ••••••，眼睛按钮可临时显示，点击单元格复制真实值；规则改动会立即重新渲染当前笔记。',
+    setting_column_rules_desc: '默认全部按明文显示，不做任何自动推断。只有在这里手动把列名设为「密文」的列才显示 ••••••；精确匹配优先，其次列名包含规则名，未命中按明文。改动会立即重新渲染当前笔记。',
     column_rule_name_placeholder: '列名，例如 手机号',
     column_rule_mode_plain: '明文',
     column_rule_mode_secret: '密文',
     btn_add_column_rule: '添加自定义列名',
-    btn_restore_default_rules: '恢复默认',
-    confirm_restore_rules: '恢复默认列显示规则？当前自定义规则会被覆盖。',
+    btn_restore_default_rules: '清空全部规则（全明文）',
+    confirm_restore_rules: '清空全部列显示规则？清空后所有列都按明文显示。',
     notice_rule_name_empty: '列名不能为空，未保存。',
     notice_rule_limit: '最多 {limit} 条列显示规则，已忽略新增。',
-    notice_rules_restored: '已恢复默认列显示规则。',
+    notice_rules_restored: '已清空全部规则，所有列按明文显示。',
     setting_clipboard_clear: '剪贴板清空（秒）',
     setting_clipboard_clear_desc: '复制密钥后经过该时长自动清空剪贴板；若期间剪贴板已被替换则不会覆盖新内容。',
     setting_lock_now: '立即锁定',
@@ -269,7 +280,7 @@ const I18N = {
     btn_sample_append: 'Append',
     btn_sample_replace: 'Replace all',
     note_guide_title: 'Start your account table here',
-    note_guide_desc: 'Notes mode renders tables and links like a Markdown note. Table cells are shown as literal text, with no inline Markdown or reference parsing. "Insert sample table" writes a three-column example into the editor and does not save automatically.',
+    note_guide_desc: 'Notes mode renders tables and links like a Markdown note. Table cells are shown as literal text, with no inline Markdown or reference parsing. "Insert sample table" writes a four-column example into the editor and does not save automatically; table cells stay plain by default with no automatic masking.',
     notice_notes_mode_hint: 'This is notes mode: maintain an account table like a Markdown note; tables render after saving.',
     notice_note_content_hint: 'This looks like note content; notes mode will render it as a table.',
     notice_cell_copied: 'Copied',
@@ -335,16 +346,16 @@ const I18N = {
     setting_bg_lock_immediate: 'Immediate (strict)',
     setting_bg_lock_seconds: '{n} seconds',
     setting_column_rules: 'Column display rules',
-    setting_column_rules_desc: 'Decide plain or secret display by column name. Exact matches win, then a column name containing the rule name; unmatched columns are plain. Secret cells show ••••••, the eye button reveals temporarily, and clicking the cell copies the real value. Rule changes re-render the current note immediately.',
+    setting_column_rules_desc: 'Everything is plain by default, with no automatic inference. Only columns you explicitly mark as "Secret" here are masked with ••••••; exact matches win, then a column name containing the rule name, and unmatched columns are plain. Changes re-render the current note immediately.',
     column_rule_name_placeholder: 'Column name, e.g. phone',
     column_rule_mode_plain: 'Plain',
     column_rule_mode_secret: 'Secret',
     btn_add_column_rule: 'Add custom column name',
-    btn_restore_default_rules: 'Restore defaults',
-    confirm_restore_rules: 'Restore the default column display rules? Your custom rules will be overwritten.',
+    btn_restore_default_rules: 'Clear all rules (all plain)',
+    confirm_restore_rules: 'Clear all column display rules? Every column will be shown as plain text.',
     notice_rule_name_empty: 'Column name cannot be empty; nothing was saved.',
     notice_rule_limit: 'At most {limit} column display rules; the new one was ignored.',
-    notice_rules_restored: 'Default column display rules restored.',
+    notice_rules_restored: 'All rules cleared; every column is plain now.',
     setting_clipboard_clear: 'Clipboard clear (seconds)',
     setting_clipboard_clear_desc: 'Clear the clipboard after copying a secret. If the clipboard has been replaced meanwhile, the new content is left untouched.',
     setting_lock_now: 'Lock now',
@@ -513,7 +524,7 @@ function normalizeColumnRules(value) {
     rules.push({ name, mode });
     if (rules.length >= COLUMN_RULE_LIMIT) break;
   }
-  // 非空数组全是脏数据时回到默认规则；显式清空数组则保留为空（全部按明文）
+  // 非空数组全是脏数据时回到默认（空表）；显式清空数组同样得到空表（全部按明文）
   if (value.length > 0 && !rules.length) return cloneDefaultColumnRules();
   return rules;
 }
@@ -808,31 +819,31 @@ class SecretVaultSettingTab extends PluginSettingTab {
             });
         });
 
-        // 明文/密文用分段按钮二选一，避免两个独立开关的互斥时序问题
-        const modeGroup = rowEl.createDiv({ cls: 'xsv-rule-mode' });
+        // 模式控件用下拉框：当前值直接显示在框内，不再依赖分段按钮的选中态高亮
+        const modeSelect = rowEl.createEl('select', { cls: 'dropdown xsv-rule-select' });
         for (const mode of COLUMN_RULE_MODES) {
-          const active = row.rule.mode === mode;
-          const button = modeGroup.createEl('button', {
-            cls: 'xsv-seg-btn' + (active ? ' xsv-seg-btn-active' : ''),
+          const option = modeSelect.createEl('option', {
             text: t(mode === 'secret' ? 'column_rule_mode_secret' : 'column_rule_mode_plain'),
           });
-          button.setAttribute('type', 'button');
-          button.addEventListener('click', () => {
-            if (this.rulesBusy || active) return;
-            if (row.draft) {
-              draft.mode = mode;
-              refresh();
-              return;
-            }
-            this.rulesBusy = true;
-            void plugin
-              .updateColumnRule(row.index, { mode })
-              .then(() => {
-                this.rulesBusy = false;
-                refresh();
-              });
-          });
+          option.value = mode;
         }
+        modeSelect.value = row.rule.mode;
+        modeSelect.addEventListener('change', () => {
+          if (this.rulesBusy) return;
+          const mode = COLUMN_RULE_MODES.indexOf(modeSelect.value) >= 0 ? modeSelect.value : 'plain';
+          if (row.draft) {
+            draft.mode = mode;
+            return;
+          }
+          if (row.rule.mode === mode) return;
+          this.rulesBusy = true;
+          void plugin
+            .updateColumnRule(row.index, { mode })
+            .then(() => {
+              this.rulesBusy = false;
+              refresh();
+            });
+        });
 
         const remove = rowEl.createEl('button', { cls: 'xsv-rule-remove', text: '×' });
         remove.setAttribute('type', 'button');
@@ -1347,8 +1358,9 @@ class SecretVaultView extends ItemView {
     this.renderMarkdown(body, selected.body);
   }
 
-  // 示例表：一眼看到明文列、密文列、可点链接与转义后的特殊符号
+  // 示例表：一眼看到默认全明文、可点链接与转义后的特殊符号
   // 密码列含 |、*、_；竖线在源码中写成 \|，渲染与复制都还原为 |
+  // 默认不做按列名遮挡；表下写明只有手动设为「密文」才会遮挡
   buildSampleNote() {
     return [
       '# 我的密钥',
@@ -1359,6 +1371,8 @@ class SecretVaultView extends ItemView {
       '| :--- | :--- | :--- | :--- |',
       '| GitHub | me@example.com | p@ss\\|w0rd*_2026 | [github.com](https://github.com) |',
       '| 阿里云 | ops@example.com | P@ss-W0rd_*2026 | [aliyun.com](https://console.aliyun.com) |',
+      '',
+      '表格默认全部按原文显示。只有把列名加进「设置 → 列显示规则」并选「密文」，该列才会遮挡。',
     ].join('\n');
   }
 
@@ -1752,7 +1766,7 @@ class SecretVaultView extends ItemView {
 }
 
 /* ------------------------------------------------------------------ */
-/* 简单确认弹窗（恢复默认列规则等二次确认）                             */
+/* 简单确认弹窗（清空全部列规则等二次确认）                             */
 /* ------------------------------------------------------------------ */
 class ConfirmModal extends Modal {
   constructor(app, title, message, confirmLabel, cancelLabel, onConfirm) {
@@ -1940,6 +1954,8 @@ class XUSecretVault extends Plugin {
     this.settings.backgroundLockSeconds = normalizeBackgroundSeconds(this.settings.backgroundLockSeconds);
     // 只保留 { name, mode }；旧格式/脏数据自动归一化，绝不携带任何密码或笔记内容
     this.settings.columnRules = normalizeColumnRules(this.settings.columnRules);
+    // 0.3.1 默认的 12 条预置规则不算用户自定义：升级到 0.3.2 时静默清空，回到全明文
+    if (isLegacyDefaultColumnRules(this.settings.columnRules)) this.settings.columnRules = [];
   }
 
   getBackgroundLockSeconds() {
@@ -1987,7 +2003,7 @@ class XUSecretVault extends Plugin {
       new Notice(this.t('notice_rule_name_empty'), 3000);
       return { ok: false, reason: 'empty' };
     }
-    const normalizedMode = COLUMN_RULE_MODES.indexOf(mode) >= 0 ? mode : 'secret';
+    const normalizedMode = COLUMN_RULE_MODES.indexOf(mode) >= 0 ? mode : 'plain';
     const rules = this.getColumnRules();
     const existing = rules.filter((rule) => rule.name.toLowerCase() === cleanName.toLowerCase())[0];
     if (existing) {
@@ -2031,6 +2047,7 @@ class XUSecretVault extends Plugin {
     return { ok: true, rules: this.settings.columnRules };
   }
 
+  // 默认规则是空表：此操作清空全部自定义规则，回到「全明文」
   async applyDefaultColumnRules() {
     this.settings.columnRules = cloneDefaultColumnRules();
     await this.saveSettings();
@@ -2039,7 +2056,7 @@ class XUSecretVault extends Plugin {
     return this.settings.columnRules;
   }
 
-  // 恢复默认必须二次确认，避免误清自定义规则
+  // 清空规则必须二次确认，避免误清自定义规则
   requestRestoreDefaultColumnRules(onDone) {
     this.confirmModal = new ConfirmModal(
       this.app,

@@ -421,14 +421,16 @@
 
 .xsv-rule-row {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .xsv-rule-name {
   flex: 1 1 auto;
-  min-width: 120px;
-  max-width: 320px;
+  min-width: 0;
+  max-width: none;
   padding: 4px 8px;
   font-size: 0.9em;
   color: var(--text-normal);
@@ -442,29 +444,14 @@
   border-color: var(--interactive-accent);
 }
 
-.xsv-rule-mode {
-  display: inline-flex;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.xsv-seg-btn {
-  padding: 4px 10px;
+/* 下拉固定窄宽：列名输入占主要宽度，窄屏时输入框先收缩而不是整行换行 */
+.xsv-rule-row .xsv-rule-select {
+  flex: 0 0 96px;
+  width: 96px;
+  max-width: 96px;
+  min-width: 96px;
+  padding: 4px 6px;
   font-size: 0.84em;
-  color: var(--text-muted);
-  background: var(--background-primary);
-  border: none;
-  cursor: pointer;
-}
-
-.xsv-seg-btn:hover {
-  background: var(--background-modifier-hover);
-}
-
-.xsv-seg-btn-active {
-  color: var(--text-on-accent);
-  background: var(--interactive-accent);
 }
 
 .xsv-rule-remove {
