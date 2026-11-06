@@ -30,7 +30,7 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 - 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦**立即加遮罩并清屏**，但会话保留，倒计时结束才锁定（默认 30 秒，可选立即 / 5 / 10 / 30 / 60 / 120 秒）；倒计时内回到窗口自动解除遮罩，不要求重输主密码。后台超过 60 秒仍强制锁定。锁定时清空整页明文、编辑区、草稿、复制缓存并丢弃密钥。
 - 写盘采用「写唯一 `.tmp` → 读回解密比对 → 留 `.bak` → rename 原子替换 → 终检 → 删 `.bak`」；任一步失败都保留或回滚旧文件，启动时清理本插件遗留的 `*.tmp*`。检测到文件被外部修改时拒绝覆盖，并另存 `*.conflict-时间戳.enc` 副本，冲突后必须先「重新加载」才能继续编辑。
 - 倒计时结束、新开第二个面板等需要重新验证的场景，与解锁同等强度：重新付出完整 KDF 成本并解开会话挑战密文，不使用无盐哈希比对；连续错误复用同一套指数退避。
-- 信封格式升级为 v2，并保留 v1 兼容读取：旧信封解密成功后提示并自动升级为 v2；未知版本明确提示「版本不支持」，不会被误读成密码错误。
+- 信封格式升级为 v3（DEK + KEK + 主密钥 MK），并保留 v1 / v2 兼容读取：旧信封解密成功后提示并自动升级为 v3；未知版本明确提示「版本不支持」，不会被误读成密码错误。
 - 连续解锁失败按指数退避（上限 30 秒），计数只在内存，重启清零。
 - 界面支持中文（默认）与 English。
 
@@ -51,7 +51,7 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 - Auto-lock after 15 minutes idle by default; backgrounding or losing window focus **masks and clears immediately**, but keeps the session and locks only when the countdown ends (default 30 seconds; immediate / 5 / 10 / 30 / 60 / 120). Returning within the countdown unmasks without the master password. More than 60 seconds in the background still forces a lock.
 - Writes use "write a unique .tmp, decrypt-verify, keep .bak, atomic rename, final verify, delete .bak"; any failure keeps or rolls back the old file, and stale `*.tmp*` files are cleaned at startup. External modifications are never overwritten and are saved as a `*.conflict-<timestamp>.enc` copy, which requires "Reload" before editing continues.
 - Re-verification (after the countdown ends or when opening a second panel) costs a full KDF derivation and decrypts an in-session challenge ciphertext; it never compares an unsalted hash, and repeated failures reuse the same exponential backoff.
-- The envelope format is now v2 with v1 compatibility reads: legacy envelopes are decrypted, announced and upgraded to v2 automatically; unknown versions report "unsupported version" instead of a password error.
+- The envelope format is now v3 (DEK + KEK + master key), with v1 / v2 compatibility reads: legacy envelopes are decrypted, announced and upgraded to v3 automatically; unknown versions report "unsupported version" instead of a password error.
 - Repeated unlock failures use exponential backoff capped at 30 seconds, kept in memory only.
 - UI language: Chinese (default) and English.
 
@@ -66,6 +66,8 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 - **密钥隔离**：每个文件有自己的 salt、IV、写盘哈希和写盘串行链；切换文件时不会互相污染冲突检测状态。会话内缓存每个文件的派生密钥，切回已打开过的文件不重复 KDF；首次打开新文件会做一次 PBKDF2 并显示 loading。
 - **错误密码文件**：切换到一个用别的主密码加密的文件时提示「该文件不是用当前主密码加密」，当前文件保持不变、会话不清空，目标文件不会被覆盖。
 - **旧版兼容**：`<vault>/xu-secrets.enc` 若存在，启动时作为默认文件加载，**不迁移、不删除**，并继续显示在「未分组」里。
+- **批量改密 / 批量恢复**：改主密码与恢复后重设密码都是跨全部 `.enc`（含各分组）的批量操作，逐个文件「旧密码解包 → 新 salt / 新 KEK 重包 → 原子替换 → 读回终检」，全程显示「第 N / M 个文件」，期间禁止切换文件、新建与编辑。任一文件失败则**整批回滚**到操作前字节，不会出现一半新密码、一半旧密码的库。锁定或失焦导致挂起时会安全中断，并在 `lastBatchResult` 中记录已回滚的文件。
+- **新文件与恢复通道**：解锁状态下新建的文件会沿用当前会话的密保块与恢复码块，因此同一库内任一文件都能作为恢复入口；恢复成功后会强制设置新主密码，并把全部文件重包。
 - **明文边界**：文件名与分组名在文件系统中是明文可见的，只有内容加密；不透明文件名 + 加密索引列为二期。
 
 从「新建一个工作组」到「在里面写笔记」的完整点击路径：
@@ -188,14 +190,25 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 ### 基本流程
 
 1. 点击左侧功能区的锁图标，或按 `Cmd/Ctrl+P` 执行「打开密钥保险库」。
-2. 首次使用：在整页的居中卡片中输入两次主密码，点击「创建保险库」。主密码不会写入磁盘，忘记后无法恢复。
-3. 解锁后进入宽内容区：上方是笔记列表，下方是笔记渲染区。点击「编辑笔记」直接写 Markdown 账号表与说明，点击「保存笔记」落盘。
-4. 表格里每个非空单元格都能点击复制；单元格若是链接则改为打开浏览器。默认全部按原文显示，不会自动遮挡；手动在设置里标为「密文」的列才显示 `••••••`，眼睛按钮临时显示，点击单元格复制真实值；沿用 30 秒剪贴板自动清空。
-5. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，倒计时内回来自动恢复，倒计时结束或后台超过 60 秒则锁定。
+2. 首次使用：在整页的居中卡片中输入两次主密码，点击「下一步」。创建向导共三步：主密码 → 密保问题（可选）→ 恢复码。
+3. 密保问题可选但建议设置：三道题可从预置列表选择或自定义，答案至少 12 个字符；点「暂不设置」会二次确认。设置后可在设置页修改（需当前主密码）。
+4. 恢复码只显示一次：点「复制」或抄写后必须点「我已保存」才能进入主界面。请把它存进密码管理器或离线介质，不要放在本库、聊天记录或截图里。
+5. 解锁后进入宽内容区：上方是笔记列表，下方是笔记渲染区。点击「编辑笔记」直接写 Markdown 账号表与说明，点击「保存笔记」落盘。
+6. 表格里每个非空单元格都能点击复制；单元格若是链接则改为打开浏览器。默认全部按原文显示，不会自动遮挡；手动在设置里标为「密文」的列才显示 `••••••`，眼睛按钮临时显示，点击单元格复制真实值；沿用 30 秒剪贴板自动清空。
+7. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，倒计时内回来自动恢复，倒计时结束或后台超过 60 秒则锁定。
+
+### 忘记主密码
+
+解锁页提供「忘记主密码？」入口，点开后先显示风险说明，再给出两条路：**恢复码（推荐）**或**三道密保问题**。两者解出的都是本库的**主密钥**（不是单个文件的 DEK），因此恢复一次即可解开全部文件；恢复成功后必须设置新主密码，插件会把全部 `.enc` 重包为新密码。若既没有恢复码、也没有设置密保问题，则**无法恢复**，插件不提供任何后门。
+
+- 恢复码：128 位随机秘密，Base32 编码后附 30 位 CRC 校验，显示为 32 字符 / 8 组；只显示一次，不写入 `data.json`、文件或日志。
+- 密保问题：三道题全对才恢复；答案做 NFC + 去首尾空白 + 大小写不敏感 + 折叠内部空白的归一化后参与派生，但只把问题文本的 SHA-256 绑定进恢复块 AAD，答案本身不落盘。
+- 统一失败文案：恢复码错误、密保答错、问题文本被篡改都只提示「恢复失败」，不暴露具体是哪一步失败。
+- 退避：恢复失败与解锁失败共用同一套失败计数与指数退避（上限 30 秒），恢复成功后清零。
 
 ### 首次使用
 
-主密码只用于在本机派生加密密钥。请使用足够长且唯一的密码，并自行做好备份。保险库文件损坏或主密码遗失时，插件无法恢复数据。
+主密码只用于在本机派生加密密钥。请使用足够长且唯一的密码，并自行做好备份。设置恢复码或密保问题后，可在忘记主密码时恢复；两者都没有时，保险库文件损坏或主密码遗失将无法恢复数据。
 
 ### 日常使用
 
@@ -212,6 +225,8 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 | 失焦锁定倒计时 | 30 秒 | 失焦立即遮罩；可选立即 / 5 / 10 / 30 / 60 / 120 秒。倒计时内返回自动恢复，归零则锁定。 |
 | 列显示规则 | 空（全明文） | 只有手动设为「密文」的列才遮挡；用下拉切换明文/密文，支持增删与清空全部规则（二次确认）；改动立即生效。 |
 | 剪贴板清空（秒） | 30 | 复制密钥后自动清空剪贴板；剪贴板已被替换时不会覆盖。 |
+| 修改主密码 | — | 需当前主密码；可选「快速改密」（只换 salt/KEK 重包，秒级）或「彻底轮换」（新 DEK + 重加密全部内容）。覆盖全部 `.enc`，显示 N/M 进度，失败整批回滚。 |
+| 设置 / 修改密保问题 | — | 需当前主密码；三道题可预置或自定义，答案至少 12 个字符；修改后全部文件写入新的恢复块。 |
 | 立即锁定 | — | 清除内存中的密钥与明文，需要重新输入主密码。 |
 
 ## 命令列表
@@ -225,17 +240,54 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 
 ### 加密设计
 
-- 密钥派生：PBKDF2-HMAC-SHA512，600,000 次迭代，随机 16 字节盐；盐与迭代数写入信封头并参与 GCM 认证。主密码在派生前先做 Unicode NFC 归一化，不同平台/输入法下的等价字符会得到一致结果；因此请保持输入法不做额外的全半角或形近字符改写。
-- 数据加密：AES-256-GCM，认证标签长度显式设为 128 位，每次写盘生成新的随机 12 字节 IV；整个条目集合作为整体加密。
-- 认证：`formatVersion`、KDF 算法、迭代数、盐与 `cipher.algo` 拼成规范化字符串作为 `additionalData`，任何头字段或算法名被篡改都会导致解密失败，避免把迭代数改小、替换盐或降级算法的攻击。
-- 密钥生命周期：派生密钥为 non-extractable，仅保存在内存；锁定、自动锁定、关闭面板或插件卸载时置空。主密码、密钥、明文均不写入 `data.json` 或任何配置文件。
+信封 v3（每个 `.enc` 一份）：
+
+```
+kdf{ algo, iterations, salt }                 // 主密码 → KEK（PBKDF2-SHA512 600k，每文件随机 16B salt）
+cipher{ algo, iv } + payload                  // DEK 加密内容（AES-256-GCM，随机 DEK 仅内存）
+fileId                                        // 建库时 16B 随机，永久不变
+wrappedDek{ iv, ciphertext }                  // KEK 包裹 DEK（用途 AAD = password）
+wrappedMasterKey{ iv, ciphertext }            // KEK 包裹主密钥 MK（用途 AAD = password）
+wrappedDekByMaster{ iv, ciphertext }          // MK 包裹 DEK（用途 AAD = master-dek）
+recovery{ kdf, questions, wrappedMasterKey }  // 三道密保答案 → 恢复 KEK（1,000,000 次）包裹 MK
+recoveryCode{ kdf, wrappedMasterKey }         // 恢复码 → 恢复 KEK（100,000 次）包裹 MK
+```
+
+- **主密码 → KEK**：PBKDF2-HMAC-SHA512 600,000 次 + 每文件独立 16 字节盐。主密码先做 Unicode NFC 归一化。
+- **两层密钥**：每个文件随机生成 32 字节 DEK，只用 AES-256-GCM 加密 payload，仅存在于内存；主密码派生的 KEK 包裹 DEK，同时包裹 32 字节主密钥 MK。`wrappedDekByMaster` 让 MK 也能解开每个文件的 DEK。
+- **改密码语义**：快速改密只换 salt 与 KEK、重包 `wrappedDek` / `wrappedMasterKey`（DEK 与 payload 不变，秒级）；彻底轮换重新生成 DEK、重加密全部内容并重包。旧备份文件仍只能用旧主密码打开，UI 会明确提示这一点。
+- **AAD 拆分（两套，互不混用）**：
+  - 包裹层 AAD：`xsv-aad-v3|wrap|<purpose>|<formatVersion>|<kdf.algo>|<iterations>|<salt>|<cipher.algo>`，`purpose` 为 `password` / `recovery` / `master-dek`。恢复块的 `recovery` 用途还会额外拼上三道问题文本的 SHA-256（排序后），因此篡改问题文本必然恢复失败。
+  - 内容层 AAD：`xsv-aad-v3|payload|<formatVersion>|<fileId>|<cipher.algo>`。**不含 salt / iterations**，所以换主密码只重包包裹层即可，无需重加密内容。
+- **恢复码 → 主密钥层级**：恢复码和密保答案解出的都是 MK（不是某个文件的 DEK）。MK 再通过 `wrappedDekByMaster` 解开每个文件的 DEK，因此一次恢复可以覆盖全部文件；恢复成功后强制设置新主密码，并用新 KEK 重包所有文件。新建文件会复制当前会话的恢复块，保证同一库内任一文件都能作为恢复入口。
+- **恢复码格式**：128 位随机秘密 → Base32（26 字符）→ 追加 30 位 CRC 校验（6 字符）→ 32 字符按 4 字符分 8 组显示。校验位只用于输入纠错，不参与密钥派生；输错一位直接拒绝，不进入 KDF。
+- **数据加密**：AES-256-GCM，认证标签长度显式设为 128 位，每次写盘生成新的随机 12 字节 IV；整个笔记集合作为整体加密。
+- **批量写盘**：改密 / 恢复都是逐文件「读出旧字节快照 → 生成新信封 → 原子替换 → 读回终检」；任一文件失败即按相反顺序用 `atomicRestoreText` 还原已完成文件，保证整批要么全新密码、要么全部回滚。批量期间禁止切换文件、新建与编辑；锁定会置位中断标记，已写文件全部回滚。
 - 落盘校验：先写唯一命名的 `*.tmp`（内容仍是密文），读回后解密并逐字段比对，留 `.bak` 后 `rename` 原子替换，终检通过再删 `.bak`；任一步失败都会清理 tmp；若 rename 后终检失败，则用 `.bak` 回滚并同步修正哈希记录。启动时清理本插件遗留的 `*.tmp*`。
 - 同步冲突：记录上次读写的文件哈希；`rename` 前还会重取一次哈希复核（缩小 TOCTOU 窗口）。发现外部修改（或凭空出现/消失）时拒绝覆盖，把本次改动另存为 `xu-secrets.conflict-<时间戳>.enc`；内存快照标记为过期，弹窗与入口禁止继续编辑，必须点「重新加载」后才恢复。
 - 抗爆破：连续解锁失败按指数退避（0.5 秒起，上限 30 秒），成功或重启后清零，计数只在内存。倒计时结束或新开多面板时的重新验证同样付出完整 KDF 成本并受同一套退避约束，不使用无盐哈希比对。
 - 统一失败口径：文件缺失、JSON 畸形、base64 损坏、密码错误对外都只给一条「解锁失败」文案，不向界面抛原始异常；文件缺失单独显示「找不到保险库」错误态，且不会引导重新创建。仅「未知信封版本」单独提示「版本不支持」。
-- 版本兼容：信封格式为 v2（`xsv-aad-v2`）。读取时对 v1 信封先按 v2 AAD、再按 `xsv-aad-v1` 尝试；解密成功后提示并自动重写为 v2。未知版本直接拒绝并提示「版本不支持」。
+- 版本兼容：当前信封为 v3（`xsv-aad-v3`）。读取 v1 / v2 信封时，解密成功后生成 DEK 并重写为 v3，原字节保留为 `.bak`；先写 tmp、读回逐字段比对，失败则保持原文件字节并继续以兼容模式打开。旧版插件无法再读取已升级文件，升级前请先备份副本。
 - 容量上限：保险库文件超过 8 MB 时拒绝读取与写入，避免超大文件导致解密与整体重加密卡死。
 - 笔记渲染：自带的极简 Markdown 渲染器全程用 DOM API 构建节点，不使用 `innerHTML`/`insertAdjacentHTML`；Markdown 中的 HTML 标签一律按文本转义显示。表格单元格按 `textContent` 写入，`{{...}}` 与行内 Markdown 不再解析；密文列在 DOM 中只写入 `••••••`，真实值仅在被点击复制或眼睛临时显示时进入内存。笔记源码与条目明文一起放在同一个加密载荷里，落盘只有密文。
+
+### 密码强度估算
+
+创建主密码与「修改主密码」两处使用同一个估算组件：输入后 200ms 防抖计算，显示「单张高端显卡 5,000 次/秒」与「多卡/集群 1,000,000 次/秒」两列预计破解时间，并按三档着色（CSS class，不写内联样式）：
+
+- **危险（秒级）**：预估时间小于 1 小时；创建 / 修改时弹出二次确认，确认文案包含两档耗时。
+- **一般（小时到天）**：预估时间小于 1 年。
+- **安全（年以上）**。
+
+估算引擎不是单一字符集熵：会对字典词（`password`/`admin`/`qwerty`/`abc123`/`iloveyou`/`letmein` 及常见中文拼音）、键盘/字母序列（`qwer`/`1234`/`abcd`）、重复与递增（`aaaa`/`1111`/`2024`）、纯日期、手机号形态、短纯数字分别施加惩罚；≤6 位纯数字会额外提示。典型结果：`Password123!` 约 0.0098 秒（危险），`123456` 约 0.0032 秒（危险），`Xk9#mQ2!vL7@` 约 1.08×10²⁰ 秒（安全）。
+
+这两条边界必须和估算结果一起理解：
+
+> 这是离线爆破估算；如果这个密码在别处泄露过、或被重复使用，攻击者不需要爆破。
+
+> 估算基于当前算法参数，参数调整后时间会变。
+
+估算过程不记录、不打印、不持久化密码，全部在本地完成，不发起任何网络请求。
 
 ### 锁定的实际动作
 
@@ -250,17 +302,33 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 - Obsidian 与操作系统的编辑历史、撤销栈、崩溃转储、交换文件、屏幕录制或截图工具。
 - 本插件运行期间的内存：解锁到锁定之间，条目明文存在于进程内存中；锁定时主动置空，但操作系统层面的内存快照不受插件控制。
 
+### 安全边界（必须如实告知）
+
+- 忘记主密码且**未设置**恢复码 / 密保问题：数据无法恢复，插件没有后门。
+- 密保问题把安全强度降到「答案有多难猜」；恢复码才是强通道，请存进密码管理器或离线介质。两者同时设置时，整体安全取最弱的一环。
+- 插件 JS 可读、可反编译；安全来自密钥与算法，而不是代码隐藏。
+- 解锁期间明文存在于进程内存与界面中；同进程其他插件、剪贴板历史、崩溃转储、截图或录屏工具**不在**本插件防护范围内。
+
 ### 已知限制
 
 - 桌面端限定（`isDesktopOnly: true`）：手机端 WebView 的 `crypto.subtle` 与剪贴板 `readText` 均未实测，因此不宣称移动端可用；后续实测通过再放开。
 - 大保险库（数千条目或超大私钥）每次保存都要整体重加密、解密比对与全文读回，保存耗时随数据量增长；超过 8 MB 直接拒绝。
 - 空闲自动锁由 15 秒一次的后台检查触发，实际精度取决于检查周期；失焦倒计时由 1 秒一次的计时器检查，并用单调钟 + 墙钟兜底休眠。任意面板交互会重置空闲计时。
-- 不做明文导出/另存为明文、不做主密码提示、不提供密码找回；这些是刻意的安全取舍。
+- 不做明文导出/另存为明文、不做主密码提示；未设置恢复码或密保问题时也不提供密码找回，这些是刻意的安全取舍。
 - 保险库文件被外部程序同时改写时，插件拒绝覆盖并生成 conflict 副本，不会自动合并；冲突后进入只读态，必须「重新加载」才能继续编辑，需要用户自行比对两份文件。
-- v1 兼容读取并升级为 v2 后，旧版插件将无法再读取该文件；升级前请先备份副本。
-- 备份方式就是复制 `xu-secrets/` 目录下的目标密文文件本身（旧版则是 `xu-secrets.enc`）；不需要也不应该导出明文。恢复时把对应文件放回原位即可。每个文件的 salt 独立，备份文件只能用加密它时的主密码解开。
+- v1 / v2 兼容读取并升级为 v3 后，旧版插件将无法再读取该文件；升级前请先备份副本。
+- 备份方式就是复制 `xu-secrets/` 目录下的目标密文文件本身（旧版则是 `xu-secrets.enc`）；不需要也不应该导出明文。恢复时把对应文件放回原位即可。每个文件的 salt 独立，备份文件只能用加密它时的主密码解开；改密不会自动更新你手工复制的旧备份。
+- 批量改密 / 恢复过程中主密码会短暂同时以新旧两种包裹形式存在；操作失败会整批回滚，但如果你在批量进行中强行杀死进程，请用对应密码逐个尝试，或从 `.bak` 与备份恢复。
 
 ## 版本记录
+
+### 0.5.0
+
+- 信封升级为 v3：每个文件独立 DEK，主密码派生 KEK 包裹 DEK，另有主密钥 MK 层与 `wrappedDekByMaster`；内容层 AAD 只绑 `formatVersion|fileId|cipher.algo`，包裹层 AAD 绑 KDF 参数与用途，两套彻底分离。旧 v1 / v2 首次解锁自动迁移为 v3，保留 `.bak` 并在失败时保持原字节。
+- 改主密码提供「快速改密」（只换 salt / KEK 重包，内容不重加密）与「彻底轮换」（新 DEK + 重加密全部内容）两档；覆盖全部文件，显示第 N/M 个，失败整批回滚，锁定/失焦会安全中断并记录已回滚文件。
+- 新增三道密保问题与一次性恢复码（128 位 + CRC 校验、Base32 8 组），二者解出主密钥，可恢复全部文件；恢复成功强制设置新主密码并重包全库。恢复失败与解锁共用失败计数与 30 秒退避。
+- 新增密码强度估算器：200ms 防抖、两列离线 ETA、三档标签、字典/序列/重复/日期/手机号/短数字惩罚，危险档创建与修改都需二次确认；忽略泄露与复用风险，并注明参数变化会影响估算。
+- 新增批量进度提示与批量期间写操作守卫；新增测试覆盖三文件跨分组改密、中途失败回滚、锁定中断、恢复码/密保恢复、问题文本篡改与 AAD 分离。
 
 ### 0.4.0
 
@@ -373,8 +441,8 @@ XU Secret Vault keeps passwords, API keys and private keys in **multiple indepen
 
 ## 技术说明（纯中文）
 
-- 文件格式：单个 JSON 信封，字段为 `formatVersion`（当前 2）、`kdf { algo, iterations, salt }`、`cipher { algo, iv }`、`payload`（base64 密文）。`updatedAt` 与条目一起放在加密载荷内，不在信封头明文暴露。
-- 每次保存都会重新生成 IV，盐在保险库生命周期内保持不变；创建新保险库时才生成新盐。v1 信封读取成功后会自动重写为 v2。
+- 文件格式：单个 JSON 信封，`formatVersion` 当前为 3；字段包括 `kdf { algo, iterations, salt }`、`cipher { algo, iv }`、`fileId`、`wrappedDek`、`wrappedMasterKey`、`wrappedDekByMaster`、可选 `recovery` / `recoveryCode` 与 `payload`（base64 密文）。`updatedAt` 与笔记一起放在加密载荷内，不在信封头明文暴露。
+- 每次保存都会重新生成 IV；盐在每个文件内保持不变，只有改主密码时才换新盐。v1 / v2 信封读取成功后会自动重写为 v3（保留 `.bak`）。
 - 写盘使用 Obsidian 的 vault adapter：确保父目录存在 → 写唯一命名的 `*.tmp` → 读回解密逐字段比对 → 写 `.bak` → `rename` 原子替换 → 再次读回校验 → 删除 `.bak`；失败时按需回滚并清理。
 - 写盘前与 `rename` 前都会用 SHA-256 哈希比对当前磁盘内容；与上次读写记录不一致即判定外部修改。
 - 自动锁定由 15 秒一次的后台检查触发；任意面板交互（含弹窗输入）会重置空闲计时。

@@ -16,18 +16,29 @@ const GROUP_NAME_MAX = 64;
 const GROUP_UNGROUPED = '';
 // 冲突副本不进入普通文件列表：它们是同一文件的只读快照
 const CONFLICT_COPY_RE = /\.conflict-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?\.enc$/i;
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 3;
+const V2_FORMAT_VERSION = 2;
 const LEGACY_FORMAT_VERSION = 1;
 const KDF_ALGO = 'PBKDF2-SHA512';
 const KDF_HASH = 'SHA-512';
 const KDF_ITERATIONS = 600000;
+// 密保答案派生包裹密钥；恢复码是高熵随机值，迭代数可低一些
+const RECOVERY_KDF_ITERATIONS = 1000000;
+const RECOVERY_CODE_KDF_ITERATIONS = 100000;
 const AAD_PREFIX = 'xsv-aad-v2';
 const AAD_PREFIX_V1 = 'xsv-aad-v1';
-const REVERIFY_MARKER = 'xsv-reverify-challenge-v2|';
+const AAD_PREFIX_V3 = 'xsv-aad-v3';
+const REVERIFY_MARKER = 'xsv-reverify-challenge-v3|';
 const CIPHER_ALGO = 'AES-256-GCM';
 const TAG_LENGTH = 128;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
+const FILE_ID_BYTES = 16;
+const DEK_BYTES = 32;
+const MASTER_KEY_BYTES = 32;
+const RECOVERY_QUESTIONS_COUNT = 3;
+const SECURITY_ANSWER_MIN = 12;
+const MIN_MASTER_PASSWORD_LENGTH = 8;
 const MAX_VAULT_BYTES = 8 * 1024 * 1024;
 const HIDDEN_LOCK_MS = 60000;
 const BACKGROUND_LOCK_CHOICES = [0, 5, 10, 30, 60, 120];
@@ -254,7 +265,7 @@ const I18N = {
     conflict_banner: '检测到外部修改：本次改动已另存为 {path}，原文件未被覆盖。为保证不基于过期快照编辑，请先重新加载保险库。',
     btn_reload: '重新加载',
     notice_reloaded: '保险库已重新加载，可以继续编辑。',
-    notice_upgraded_v1: '检测到旧版（v1）保险库，已按兼容模式读取，并已自动升级为 v2 格式。',
+    notice_upgraded_v1: '检测到旧版（v1）保险库，已按兼容模式读取，并已自动升级为 v3 信封（DEK + KEK），原文件已保留 .bak 备份。',
     err_version_unsupported: '保险库文件版本不受支持（可能由更新版本的插件创建）。已中止读取，未做任何修改。',
     err_suspended: '保险库已因切到后台或窗口失焦而挂起，请先在面板中重新验证主密码。',
     err_conflict_editing_blocked: '检测到外部修改，原文件未被覆盖且本次改动已另存副本；请先「重新加载」再继续编辑。',
@@ -278,6 +289,96 @@ const I18N = {
     btn_eye_hide: '隐藏密码',
     notice_sensitive_columns: '本表 {count} 列按密码处理：单元格显示掩码，点击复制真实值，眼睛按钮切换显示。',
     notice_countdown_locked: '失焦倒计时结束，保险库已锁定。',
+    err_session_expired: '会话已失效，请重新解锁。',
+    err_new_password_short: '新主密码至少 8 位。',
+    err_old_password_wrong: '当前主密码错误。',
+    err_current_password_wrong: '当前主密码错误。',
+    err_recovery_questions_count: '必须填写 3 个密保问题。',
+    err_recovery_questions_empty: '密保问题不能为空。',
+    err_recovery_answers_required: '必须填写 3 个密保答案。',
+    err_recovery_answer_short: '密保答案至少 12 个字符（归一化后）。',
+    err_recovery_code_invalid: '恢复码格式无效。',
+    err_recovery_failed: '恢复失败：恢复码或密保答案不正确，无法找回。',
+    err_recovery_unavailable: '该保险库没有可用的恢复通道。',
+    err_recovery_unavailable_hint: '未设置密保问题，也没有恢复码时，忘记主密码后数据无法恢复。',
+    err_batch_busy: '正在批量处理文件（{current}/{total}），期间不能切换文件或编辑。',
+    err_batch_empty: '没有可处理的保险库文件。',
+    err_batch_interrupted: '批量操作被锁定或挂起中断，已回滚全部已处理文件。',
+    err_external_change: '批量处理期间文件被外部改动，已中止并回滚。',
+    err_legacy_needs_upgrade: '有旧格式文件尚未迁移，请先用当前主密码解锁一次再操作。',
+    notice_upgraded_v2: '检测到 v2 保险库，已自动迁移到 v3 信封（DEK + KEK），原文件已保留 .bak 备份。',
+    notice_password_changed: '主密码已更新。',
+    notice_recovery_reset: '已重置主密码，请务必牢记。',
+    notice_recovery_saved: '密保问题已保存。',
+    security_change_password: '修改主密码',
+    security_change_password_desc: '改密码只重新包裹 DEK；快速改密秒级完成，彻底轮换会重加密全部内容。',
+    btn_change_password: '修改主密码',
+    change_pw_title: '修改主密码',
+    change_pw_current: '当前主密码',
+    change_pw_new: '新主密码',
+    change_pw_confirm: '确认新主密码',
+    change_pw_mode: '改密方式',
+    change_pw_mode_quick: '快速改密（默认，秒级；旧备份仍可用旧密码解开）',
+    change_pw_mode_full: '彻底轮换（重新生成 DEK 并重加密内容，耗时更久；旧密码对旧备份仍有效，但对新文件无效）',
+    change_pw_quick_note: '快速改密后，旧备份仍可用旧密码解开其中内容。如需让旧密码彻底失效，请用彻底轮换。',
+    change_pw_full_note: '彻底轮换会为每个文件生成新 DEK 并重加密内容；旧备份从此无法用旧密码解出当前内容。',
+    change_pw_progress: '正在处理第 {current}/{total} 个文件…',
+    security_recovery_questions: '密保问题',
+    security_recovery_questions_desc: '设置 3 个只有你知道答案的问题；忘记主密码时可作为弱恢复通道。',
+    btn_set_recovery: '设置/修改密保问题',
+    recovery_title: '设置密保问题',
+    recovery_desc: '答案至少 12 字符；会做 NFC、去首尾空白、大小写不敏感、折叠连续空白归一化。答案原文不会存盘。',
+    recovery_question_label: '问题 {index}',
+    recovery_answer_label: '答案 {index}',
+    recovery_answer_hint: '建议写成只有自己知道的长句；少于 12 字符会提示偏弱。',
+    btn_save_recovery: '保存密保问题',
+    btn_skip_recovery: '暂不设置',
+    confirm_skip_recovery: '不设置密保问题，忘记主密码时数据将无法恢复。仍要继续？',
+    setup_next: '下一步',
+    setup_back: '上一步',
+    setup_questions_title: '第二步：设置密保问题（可选）',
+    setup_questions_desc: '选择或填写 3 个问题。答案至少 12 字符；不设置则忘记主密码时无法恢复。',
+    setup_questions_skip_hint: '你可以暂不设置，但必须二次确认；之后可在设置中补充。',
+    setup_code_title: '请保存你的恢复码',
+    setup_code_desc: '恢复码只显示这一次，不落盘、不写日志、不进入 data.json。请复制并存入密码管理器或离线保存。',
+    btn_copy_recovery_code: '复制恢复码',
+    btn_saved_recovery_code: '我已保存',
+    recovery_code_warning: '未点「我已保存」前不能跳过；关闭此窗口后恢复码将不再显示。',
+    btn_forgot_password: '忘记主密码？',
+    forgot_title: '忘记主密码',
+    forgot_risk: '只能用恢复码或三道密保问题找回；三道题全对才能恢复，答错不可找回。',
+    forgot_choose_code: '使用恢复码（推荐）',
+    forgot_choose_questions: '使用三道密保问题',
+    forgot_code_label: '恢复码',
+    forgot_code_hint: '可带或不带分隔符；不区分大小写。',
+    forgot_answer_label: '答案 {index}',
+    btn_recover_now: '开始恢复',
+    forgot_new_password_title: '设置新主密码',
+    forgot_new_password_desc: '恢复成功后必须设置新主密码，并会把全部文件重包为新密码。',
+    btn_reset_password: '重置主密码',
+    strength_title: '强度与离线破解估算',
+    strength_danger: '危险（秒级）',
+    strength_general: '一般（小时到天）',
+    strength_safe: '安全（年以上）',
+    strength_single_gpu: '单张高端显卡（约 5,000 次/秒）',
+    strength_cluster: '多卡/集群（约 1,000,000 次/秒）',
+    strength_note: '基于 600,000 次 PBKDF2-SHA512，且假设攻击者已拿到加密文件、可离线无限制尝试。',
+    strength_boundary_offline: '这是离线爆破估算；如果这个密码在别处泄露过、或被重复使用，攻击者不需要爆破。',
+    strength_boundary_params: '估算基于当前算法参数，参数调整后时间会变。',
+    strength_short_numeric_hint: '短数字密码（≤6 位纯数字）只适合防身边的人，挡不住离线破解。',
+    strength_confirm_title: '这个密码很弱',
+    strength_confirm_desc: '预估单卡破解时间约 {single}，集群约 {cluster}。仍要使用吗？',
+    security_boundary_title: '安全边界（务必知悉）',
+    security_boundary_desc:
+      '1) 忘记主密码且未设置恢复码 / 密保问题：无法恢复，插件没有后门。2) 密保问题把安全强度降到「答案有多难猜」，恢复码才是强通道，请存进密码管理器或离线介质；同时设置两者时，取最弱的一环。3) 插件 JS 可读、可反编译，安全来自密钥而非代码隐藏。4) 解锁期间明文在内存与界面中；同进程其他插件、剪贴板历史、崩溃转储、截图或录屏工具不在防护范围内。',
+    batch_title: '批量处理中',
+    batch_progress: '正在处理第 {current}/{total} 个文件：{name}',
+    question_preset_1: '你最喜欢的一本书是什么？',
+    question_preset_2: '你小学时最好的朋友叫什么？',
+    question_preset_3: '你给自己起的第一个网名是什么？',
+    question_custom: '自定义问题…',
+    btn_continue: '继续',
+    btn_choose_placeholder: '请选择问题…',
   },
   en: {
     cmd_open: 'Open secret vault',
@@ -473,6 +574,96 @@ const I18N = {
     btn_eye_hide: 'Hide password',
     notice_sensitive_columns: '{count} column(s) in this table are treated as passwords: cells are masked, clicking copies the real value, and the eye button toggles display.',
     notice_countdown_locked: 'The blur countdown ended, so the vault was locked.',
+    err_session_expired: 'The session has expired. Unlock again.',
+    err_new_password_short: 'The new master password must be at least 8 characters.',
+    err_old_password_wrong: 'The current master password is wrong.',
+    err_current_password_wrong: 'The current master password is wrong.',
+    err_recovery_questions_count: 'Exactly 3 security questions are required.',
+    err_recovery_questions_empty: 'Security questions cannot be empty.',
+    err_recovery_answers_required: 'Exactly 3 security answers are required.',
+    err_recovery_answer_short: 'Each security answer must be at least 12 characters after normalization.',
+    err_recovery_code_invalid: 'The recovery code format is invalid.',
+    err_recovery_failed: 'Recovery failed: the recovery code or answers are incorrect. Nothing can be recovered.',
+    err_recovery_unavailable: 'This vault has no usable recovery channel.',
+    err_recovery_unavailable_hint: 'Without security questions or a recovery code, data cannot be recovered after forgetting the master password.',
+    err_batch_busy: 'A batch operation is running ({current}/{total}); file switching and editing are disabled.',
+    err_batch_empty: 'There are no vault files to process.',
+    err_batch_interrupted: 'The batch was interrupted by lock/suspension; every processed file was rolled back.',
+    err_external_change: 'A file changed externally during the batch; the batch was aborted and rolled back.',
+    err_legacy_needs_upgrade: 'Some legacy files have not been migrated yet. Unlock them once with the current master password first.',
+    notice_upgraded_v2: 'A v2 vault was migrated to the v3 envelope (DEK + KEK). The original file was kept as a .bak backup.',
+    notice_password_changed: 'Master password updated.',
+    notice_recovery_reset: 'The master password was reset. Be sure to remember it.',
+    notice_recovery_saved: 'Security questions saved.',
+    security_change_password: 'Change master password',
+    security_change_password_desc: 'Changing the password only rewraps the DEK. Quick mode finishes in seconds; full rotation re-encrypts all content.',
+    btn_change_password: 'Change master password',
+    change_pw_title: 'Change master password',
+    change_pw_current: 'Current master password',
+    change_pw_new: 'New master password',
+    change_pw_confirm: 'Confirm new master password',
+    change_pw_mode: 'Mode',
+    change_pw_mode_quick: 'Quick (default, seconds; old backups still open with the old password)',
+    change_pw_mode_full: 'Full rotation (new DEK and re-encrypt all content; slower; old password still opens old backups but not new files)',
+    change_pw_quick_note: 'After quick change, old backups still open with the old password. Use full rotation to invalidate the old password.',
+    change_pw_full_note: 'Full rotation generates a new DEK per file and re-encrypts content; old backups can no longer decrypt current content with the old password.',
+    change_pw_progress: 'Processing file {current}/{total}…',
+    security_recovery_questions: 'Security questions',
+    security_recovery_questions_desc: 'Set 3 questions only you can answer; they are a weak recovery channel if you forget the master password.',
+    btn_set_recovery: 'Set/modify security questions',
+    recovery_title: 'Set security questions',
+    recovery_desc: 'Answers need at least 12 characters. They are normalized with NFC, trim, case-insensitive, and whitespace collapsing. Answers are never stored.',
+    recovery_question_label: 'Question {index}',
+    recovery_answer_label: 'Answer {index}',
+    recovery_answer_hint: 'Use a long sentence only you know; fewer than 12 characters is flagged as weak.',
+    btn_save_recovery: 'Save security questions',
+    btn_skip_recovery: 'Not now',
+    confirm_skip_recovery: 'Without security questions, forgetting the master password means the data cannot be recovered. Continue?',
+    setup_next: 'Next',
+    setup_back: 'Back',
+    setup_questions_title: 'Step 2: security questions (optional)',
+    setup_questions_desc: 'Choose or write 3 questions. Answers need at least 12 characters; without them, a forgotten master password cannot be recovered.',
+    setup_questions_skip_hint: 'You may skip, but you must confirm; you can add them later in settings.',
+    setup_code_title: 'Save your recovery code',
+    setup_code_desc: 'The recovery code is shown only once and is never written to disk, logs, or data.json. Copy it into a password manager or offline storage.',
+    btn_copy_recovery_code: 'Copy recovery code',
+    btn_saved_recovery_code: 'I have saved it',
+    recovery_code_warning: 'You cannot skip before confirming. Once this window closes, the code is no longer shown.',
+    btn_forgot_password: 'Forgot master password?',
+    forgot_title: 'Forgot master password',
+    forgot_risk: 'Only the recovery code or all 3 security questions can restore access. All 3 answers must be correct; wrong answers cannot be recovered.',
+    forgot_choose_code: 'Use recovery code (recommended)',
+    forgot_choose_questions: 'Use 3 security questions',
+    forgot_code_label: 'Recovery code',
+    forgot_code_hint: 'Dashes are optional; case-insensitive.',
+    forgot_answer_label: 'Answer {index}',
+    btn_recover_now: 'Recover',
+    forgot_new_password_title: 'Set a new master password',
+    forgot_new_password_desc: 'After recovery you must set a new master password; all files will be rewrapped to it.',
+    btn_reset_password: 'Reset master password',
+    strength_title: 'Strength and offline crack estimate',
+    strength_danger: 'Danger (seconds)',
+    strength_general: 'Fair (hours to days)',
+    strength_safe: 'Safe (years+)',
+    strength_single_gpu: 'Single high-end GPU (~5,000 guesses/s)',
+    strength_cluster: 'Multi-GPU / cluster (~1,000,000 guesses/s)',
+    strength_note: 'Based on 600,000 PBKDF2-SHA512 iterations, assuming the attacker already has the encrypted file and unlimited offline attempts.',
+    strength_boundary_offline: 'This is an offline cracking estimate; if this password has leaked elsewhere or is reused, the attacker does not need to crack it.',
+    strength_boundary_params: 'The estimate uses the current algorithm parameters; if those change, the times change.',
+    strength_short_numeric_hint: 'A short numeric password (≤6 digits) only keeps people near you out; it cannot stop offline cracking.',
+    strength_confirm_title: 'This password is weak',
+    strength_confirm_desc: 'Estimated crack time is about {single} on one GPU and {cluster} on a cluster. Use it anyway?',
+    security_boundary_title: 'Security boundaries (read this)',
+    security_boundary_desc:
+      '1) Forgotten master password with no recovery code or security questions: unrecoverable; there is no backdoor. 2) Security questions weaken security to "how hard are your answers to guess"; the recovery code is the strong channel, so store it in a password manager or offline. If you set both, the weakest link decides. 3) Plugin JavaScript is readable and decompilable; security comes from keys, not from hiding code. 4) While unlocked, plaintext exists in memory and on screen; other same-process plugins, clipboard history, crash dumps, screenshots and screen recorders are outside the protection scope.',
+    batch_title: 'Batch operation in progress',
+    batch_progress: 'Processing file {current}/{total}: {name}',
+    question_preset_1: 'What is your favorite book?',
+    question_preset_2: 'What was your best friend’s name in primary school?',
+    question_preset_3: 'What was the first online nickname you gave yourself?',
+    question_custom: 'Custom question…',
+    btn_continue: 'Continue',
+    btn_choose_placeholder: 'Choose a question…',
   },
 };
 
@@ -520,6 +711,72 @@ function buildAad(prefix, formatVersion, kdfAlgo, iterations, saltBase64, cipher
   );
 }
 
+// v3 包裹层 AAD：formatVersion | kdf.algo | iterations | salt | cipher.algo + 用途标识
+// 用途：password（主密码 KEK）、master（主密钥）、recovery（密保答案）、recovery-code（恢复码）
+// recovery 额外绑定三个问题文本的 SHA-256；篡改问题文本会导致解包失败。
+function buildWrapAadV3(purpose, formatVersion, kdfAlgo, iterations, saltBase64, cipherAlgo, extra) {
+  const parts = [
+    AAD_PREFIX_V3,
+    purpose,
+    String(formatVersion),
+    kdfAlgo,
+    String(iterations),
+    saltBase64,
+    cipherAlgo,
+  ];
+  if (extra) parts.push(extra);
+  return utf8Encode(parts.join('|'));
+}
+
+// v3 内容层 AAD 只绑定 formatVersion | fileId | cipher.algo。
+// 绝不能绑定主密码 salt/iterations，否则改密码/恢复后内容无法解密。
+function buildPayloadAadV3(formatVersion, fileIdBase64, cipherAlgo) {
+  return utf8Encode(
+    [AAD_PREFIX_V3, 'payload', String(formatVersion), fileIdBase64, cipherAlgo].join('|')
+  );
+}
+
+// 主密钥包裹 DEK 的 AAD 绑定 fileId，避免包裹块在文件之间被移植
+function buildMasterDekAad(fileIdBase64, cipherAlgo) {
+  return utf8Encode(
+    [AAD_PREFIX_V3, 'master-dek', String(FORMAT_VERSION), fileIdBase64, cipherAlgo].join('|')
+  );
+}
+
+async function importAesGcmKey(cryptoObj, rawKey) {
+  return cryptoObj.subtle.importKey(
+    'raw',
+    rawKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function wrapRawKey(cryptoObj, wrappingKey, rawKey, aad) {
+  const iv = randomBytes(cryptoObj, IV_BYTES);
+  const ciphertext = await cryptoObj.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: aad, tagLength: TAG_LENGTH },
+    wrappingKey,
+    rawKey
+  );
+  return { iv: bytesToBase64(iv), ciphertext: bytesToBase64(new Uint8Array(ciphertext)) };
+}
+
+async function unwrapRawKey(cryptoObj, wrappingKey, blob, aad) {
+  const plaintext = await cryptoObj.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: base64ToBytes(blob.iv),
+      additionalData: aad,
+      tagLength: TAG_LENGTH,
+    },
+    wrappingKey,
+    base64ToBytes(blob.ciphertext)
+  );
+  return new Uint8Array(plaintext);
+}
+
 // 单调时钟：系统时间被回拨/校准时不会让退避与空闲计时提前失效
 function monotonicNow() {
   if (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') {
@@ -559,6 +816,304 @@ function errorMessage(error) {
 // 主密码先做 Unicode NFC 归一化，避免同一密码在不同输入法/平台下派生结果不一致
 function normalizePassword(value) {
   return String(value == null ? '' : value).normalize('NFC');
+}
+
+// 密保答案归一化：NFC + trim + 大小写不敏感 + 折叠连续空白。
+// 只用于派生包裹密钥；答案原文永不写盘、永不写日志。
+function normalizeSecurityAnswer(value) {
+  return String(value == null ? '' : value)
+    .normalize('NFC')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function normalizeQuestionText(value) {
+  return String(value == null ? '' : value)
+    .normalize('NFC')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function joinSecurityAnswers(answers) {
+  return (Array.isArray(answers) ? answers : []).map(normalizeSecurityAnswer).join('\n');
+}
+
+// 128 位恢复码 → RFC 4648 Base32（26 字符）+ 30 位 CRC 校验（6 字符）
+// 展示为 32 字符 / 每 4 字符一组（8 组），校验位只用于输入纠错，不参与密钥派生
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(bytes) {
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+
+function recoveryCodeCrc(text) {
+  let crc = 0xffffffff;
+  for (let index = 0; index < text.length; index += 1) {
+    crc ^= text.charCodeAt(index);
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function recoveryCodeChecksum(text) {
+  const value = recoveryCodeCrc(text) & 0x3fffffff;
+  let out = '';
+  for (let shift = 25; shift >= 0; shift -= 5) out += BASE32_ALPHABET[(value >>> shift) & 31];
+  return out;
+}
+
+function formatRecoveryCode(code) {
+  const secret = String(code || '').toUpperCase();
+  const text = secret + recoveryCodeChecksum(secret);
+  const groups = [];
+  for (let index = 0; index < text.length; index += 4) groups.push(text.slice(index, index + 4));
+  return groups.join('-');
+}
+
+function normalizeRecoveryCode(value) {
+  const text = String(value == null ? '' : value)
+    .normalize('NFC')
+    .toUpperCase()
+    .replace(/[^A-Z2-7]/g, '');
+  if (text.length === 32) {
+    if (recoveryCodeChecksum(text.slice(0, 26)) !== text.slice(26)) return '';
+    return text.slice(0, 26);
+  }
+  if (text.length === 26) return text;
+  return text;
+}
+
+// 强度估算内置词表：常见英文密码 / 键盘口令 / 常见中文拼音口令
+const COMMON_PASSWORD_WORDS = [
+  'password', 'passwd', 'pass', 'admin', 'administrator', 'root', 'guest', 'login',
+  'qwerty', 'qwertyuiop', 'asdfgh', 'asdf', 'zxcvbn', 'abc123', '123456', '12345678',
+  'iloveyou', 'letmein', 'welcome', 'secret', 'master', 'hello', 'monkey', 'dragon',
+  'football', 'sunshine', 'princess', 'flower', 'shadow', 'superman', 'batman',
+  'woaini', 'woshishui', 'zhanghao', 'mima', 'mima123', 'qq123456', '5201314',
+  'woaini1314', 'aaa123', 'abc123456', '1q2w3e4r', '1qaz2wsx', 'qazwsx',
+  'p@ssw0rd', 'password1', 'password123', 'password123!', 'admin123', 'admin123!',
+  'qwerty123', 'iloveyou1', 'letmein1', 'welcome1', 'abc123!', '000000', '111111',
+  '666666', '888888', 'correct', 'horse', 'battery', 'staple', 'apple', 'orange',
+  'banana', 'summer', 'winter', 'spring', 'autumn', 'coffee', 'chocolate', 'computer',
+  'internet', 'security', 'system', 'manager', 'office', 'school', 'college',
+  'family', 'mother', 'father', 'brother', 'sister', 'friend', 'love', 'happy',
+  'money', 'gold', 'silver', 'star', 'moon', 'sun', 'rain', 'snow', 'wind',
+  'water', 'fire', 'earth', 'light', 'dark', 'blue', 'green', 'black', 'white',
+  'red', 'yellow', 'purple', 'orange', 'purple', 'silence', 'freedom', 'truth',
+  'power', 'future', 'dream', 'hope', 'peace', 'trust', 'strong', 'simple',
+  'quick', 'brown', 'lazy', 'jumps', 'over', 'the', 'and', 'for', 'with',
+];
+const COMMON_PASSWORD_SET = new Set(COMMON_PASSWORD_WORDS.map((word) => word.toLowerCase()));
+const COMMON_PASSWORD_EXACT = new Set([
+  'password', 'password1', 'password123', 'password123!', 'p@ssw0rd', 'admin',
+  'admin123', 'admin123!', 'qwerty', 'qwerty123', 'abc123', 'abc123!', '123456',
+  '12345678', '123456789', 'iloveyou', 'iloveyou1', 'letmein', 'letmein1', 'welcome',
+  'welcome1', '000000', '111111', '666666', '888888', '1q2w3e4r', '1qaz2wsx',
+  'qazwsx', 'woaini', 'woaini1314', '5201314', 'mima123', 'qq123456',
+]);
+
+const KEYBOARD_SEQUENCES = [
+  'qwertyuiop', 'asdfghjkl', 'zxcvbnm', '1234567890', 'abcdefghijklmnopqrstuvwxyz',
+];
+
+function passwordCharsetSize(password) {
+  let size = 0;
+  if (/[a-z]/.test(password)) size += 26;
+  if (/[A-Z]/.test(password)) size += 26;
+  if (/[0-9]/.test(password)) size += 10;
+  if (/[^A-Za-z0-9]/.test(password)) size += 33;
+  if (/[^\x00-\x7F]/.test(password)) size += 100;
+  return Math.max(size, 1);
+}
+
+function sequenceMask(password) {
+  const lower = password.toLowerCase();
+  const mask = new Array(lower.length).fill(false);
+  for (const row of KEYBOARD_SEQUENCES) {
+    for (const sequence of [row, row.split('').reverse().join('')]) {
+      for (let start = 0; start < lower.length; start += 1) {
+        let length = 0;
+        while (
+          start + length < lower.length &&
+          sequence.indexOf(lower[start + length]) >= 0 &&
+          (length === 0 || sequence.indexOf(lower[start + length]) === sequence.indexOf(lower[start + length - 1]) + 1)
+        ) {
+          length += 1;
+        }
+        if (length >= 3) {
+          for (let index = start; index < start + length; index += 1) mask[index] = true;
+        }
+      }
+    }
+  }
+  // 重复字符（aaaa / 1111）同样视为可预测模式
+  const repeatRe = /(.)\1{2,}/g;
+  let match;
+  while ((match = repeatRe.exec(password))) {
+    for (let index = match.index; index < match.index + match[0].length; index += 1) mask[index] = true;
+  }
+  return mask;
+}
+
+function passwordBitsToSeconds(bits, rate) {
+  const guesses = Math.min(Math.pow(2, Math.max(0, bits)), 2 ** 200);
+  return guesses / rate;
+}
+
+// 纯本地估算：不记录、不打印、不持久化密码；不做任何网络调用。
+// 返回 { tier, bits, guesses, secondsSingle, secondsCluster, reasons }
+function estimatePasswordStrength(password) {
+  const raw = String(password == null ? '' : password);
+  const reasons = [];
+  const length = raw.length;
+  if (!length) {
+    return { tier: 'danger', bits: 0, guesses: 0, secondsSingle: 0, secondsCluster: 0, reasons: ['empty'] };
+  }
+  const lower = raw.toLowerCase();
+  const charset = passwordCharsetSize(raw);
+  let bits = Math.min(200, length * Math.log2(charset));
+  let guesses = Math.pow(2, bits);
+  let forcedDanger = false;
+  let exactCommon = false;
+
+  if (COMMON_PASSWORD_EXACT.has(lower)) {
+    forcedDanger = true;
+    exactCommon = true;
+    guesses = Math.min(guesses, COMMON_PASSWORD_WORDS.indexOf(lower) + 2);
+    reasons.push('common-password');
+  }
+
+  // 纯数字短密码：搜索空间本来就小；即使长度到 8 位也按危险处理
+  if (/^[0-9]+$/.test(raw) && length <= 8) {
+    forcedDanger = true;
+    guesses = Math.min(guesses, Math.pow(10, length));
+    reasons.push('short-numeric');
+  }
+
+  // 纯日期（YYYYMMDD / YYYY-MM-DD / YYYY/MM/DD）
+  if (/^(19|20)[0-9]{2}[-/. ]?(0[1-9]|1[0-2])[-/. ]?(0[1-9]|[12][0-9]|3[01])$/.test(raw)) {
+    forcedDanger = true;
+    guesses = Math.min(guesses, 366 * 200);
+    reasons.push('date');
+  }
+
+  // 手机号形态：11 位、以 1 开头、第二位 3-9
+  if (/^1[3-9][0-9]{9}$/.test(raw)) {
+    guesses = Math.min(guesses, 1.3 * Math.pow(10, 10));
+    reasons.push('phone-number');
+  }
+
+  const tokens = lower.match(/[a-z]+/g) || [];
+  const allDictionaryWords = tokens.length >= 2 && tokens.every((token) => COMMON_PASSWORD_SET.has(token));
+  if (allDictionaryWords && tokens.join('').length >= 12) {
+    // 口令式（correct horse battery staple）：按 7776 词的口令空间估算
+    guesses = Math.min(guesses, Math.pow(7776, tokens.length));
+    reasons.push('passphrase');
+  } else if (tokens.length === 1 && COMMON_PASSWORD_SET.has(tokens[0]) && tokens[0].length >= 3) {
+    const suffixLength = Math.max(0, length - tokens[0].length);
+    const caseVariation = /[A-Z]/.test(raw) ? 2 : 1;
+    const dictGuesses = 7776 * caseVariation * Math.pow(charset, suffixLength);
+    guesses = Math.min(guesses, dictGuesses);
+    reasons.push('dictionary-word');
+  }
+
+  const mask = sequenceMask(raw);
+  const covered = mask.filter(Boolean).length;
+  if (covered >= 4 && covered >= Math.ceil(length * 0.6)) {
+    guesses = Math.min(guesses, Math.pow(10, Math.max(2, length - covered + 2)));
+    reasons.push('sequence');
+  }
+
+  const effectiveBits = Math.min(200, Math.log2(Math.max(1, guesses)));
+  const secondsSingle = Math.max(0, guesses / 5000);
+  const secondsCluster = Math.max(0, guesses / 1000000);
+  let tier = 'safe';
+  if (forcedDanger || exactCommon || secondsSingle < 3600) tier = 'danger';
+  else if (secondsSingle < 31557600) tier = 'general';
+  return {
+    tier,
+    bits: effectiveBits,
+    guesses,
+    secondsSingle,
+    secondsCluster,
+    reasons,
+  };
+}
+
+function formatDuration(seconds, lang) {
+  const en = lang === 'en';
+  if (!Number.isFinite(seconds) || seconds > 1e18) return en ? 'astronomical' : '天文数字';
+  if (seconds < 1) return en ? 'instantly' : '瞬间';
+  if (seconds < 10) return (Math.round(seconds * 10) / 10) + (en ? ' seconds' : ' 秒');
+  if (seconds < 60) return Math.round(seconds) + (en ? ' seconds' : ' 秒');
+  if (seconds < 3600) return Math.round(seconds / 60) + (en ? ' minutes' : ' 分钟');
+  if (seconds < 86400) return Math.round(seconds / 3600) + (en ? ' hours' : ' 小时');
+  if (seconds < 31557600) return Math.round(seconds / 86400) + (en ? ' days' : ' 天');
+  if (seconds < 31557600 * 10000) return Math.round(seconds / 31557600) + (en ? ' years' : ' 年');
+  return Math.round(seconds / 31557600 / 10000) + (en ? ' ×10k years' : ' 万年');
+}
+
+// 创建与修改密码共用的强度组件：200ms 防抖，纯本地，不渲染密码值本身
+function attachStrengthMeter(container, plugin, input) {
+  const t = (key, params) => plugin.t(key, params);
+  const wrap = container.createDiv({ cls: 'xsv-strength' });
+  wrap.createDiv({ cls: 'xsv-strength-title', text: t('strength_title') });
+  const head = wrap.createDiv({ cls: 'xsv-strength-head' });
+  const tierEl = head.createDiv({ cls: 'xsv-strength-tier' });
+  const bar = wrap.createDiv({ cls: 'xsv-strength-bar' });
+  const fill = bar.createDiv({ cls: 'xsv-strength-fill' });
+  const grid = wrap.createDiv({ cls: 'xsv-strength-grid' });
+  const singleLabel = grid.createDiv({ cls: 'xsv-strength-cell' });
+  singleLabel.createDiv({ cls: 'xsv-strength-label', text: t('strength_single_gpu') });
+  const singleValue = singleLabel.createDiv({ cls: 'xsv-strength-value' });
+  const clusterLabel = grid.createDiv({ cls: 'xsv-strength-cell' });
+  clusterLabel.createDiv({ cls: 'xsv-strength-label', text: t('strength_cluster') });
+  const clusterValue = clusterLabel.createDiv({ cls: 'xsv-strength-value' });
+  const shortHint = wrap.createDiv({ cls: 'xsv-hint xsv-strength-short-hint' });
+  const note = wrap.createDiv({ cls: 'xsv-hint', text: t('strength_note') });
+  wrap.createDiv({ cls: 'xsv-hint', text: t('strength_boundary_offline') });
+  wrap.createDiv({ cls: 'xsv-hint', text: t('strength_boundary_params') });
+  let timer = null;
+  let result = plugin.evaluatePasswordStrength('');
+  const update = () => {
+    result = plugin.evaluatePasswordStrength(String(input.value || ''));
+    tierEl.className = 'xsv-strength-tier xsv-strength-' + result.tier;
+    tierEl.setText(result.tierLabel);
+    fill.className = 'xsv-strength-fill xsv-strength-' + result.tier;
+    singleValue.setText(result.singleText);
+    clusterValue.setText(result.clusterText);
+    const shortNumeric = /^[0-9]{1,6}$/.test(String(input.value || ''));
+    shortHint.setText(shortNumeric ? t('strength_short_numeric_hint') : '');
+    shortHint.className = 'xsv-hint xsv-strength-short-hint' + (shortNumeric ? '' : ' xsv-hidden');
+  };
+  const schedule = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(update, 200);
+  };
+  input.addEventListener('input', schedule);
+  input.addEventListener('change', update);
+  update();
+  return {
+    update,
+    schedule,
+    get result() {
+      return result;
+    },
+  };
 }
 
 function sameJson(a, b) {
@@ -880,6 +1435,40 @@ class SecretVaultSettingTab extends PluginSettingTab {
             control: { type: 'slider', key: 'clipboardClearSeconds', min: 5, max: 120, step: 5 },
           },
           {
+            name: t('security_change_password'),
+            desc: t('security_change_password_desc'),
+            render: (setting) => {
+              setting.addButton((button) => {
+                button.setButtonText(t('btn_change_password')).onClick(() => {
+                  if (!plugin.isUnlocked()) {
+                    new Notice(t('notice_unlock_first'), 3000);
+                    return;
+                  }
+                  new ChangePasswordModal(plugin.app, plugin).open();
+                });
+              });
+            },
+          },
+          {
+            name: t('security_recovery_questions'),
+            desc: t('security_recovery_questions_desc'),
+            render: (setting) => {
+              setting.addButton((button) => {
+                button.setButtonText(t('btn_set_recovery')).onClick(() => {
+                  if (!plugin.isUnlocked()) {
+                    new Notice(t('notice_unlock_first'), 3000);
+                    return;
+                  }
+                  new RecoveryQuestionsModal(plugin.app, plugin).open();
+                });
+              });
+            },
+          },
+          {
+            name: t('security_boundary_title'),
+            desc: t('security_boundary_desc'),
+          },
+          {
             name: t('setting_lock_now'),
             desc: t('setting_lock_now_desc'),
             render: (setting) => {
@@ -1088,6 +1677,12 @@ class SecretVaultView extends ItemView {
     this.noteDraft = null;
     this.revealedCells = new Set();
     this.maskCountdownEl = null;
+    this.setupStep = 'password';
+    this.setupPassword = '';
+    this.setupQuestions = ['', '', ''];
+    this.setupAnswers = ['', '', ''];
+    this.setupRecoveryCode = '';
+    this.setupBusy = false;
   }
 
   getViewType() {
@@ -1135,6 +1730,12 @@ class SecretVaultView extends ItemView {
     this.noteDraft = null;
     this.revealedCells.clear();
     this.maskCountdownEl = null;
+    this.setupStep = 'password';
+    this.setupPassword = '';
+    this.setupQuestions = ['', '', ''];
+    this.setupAnswers = ['', '', ''];
+    this.setupRecoveryCode = '';
+    this.setupBusy = false;
     if (this.contentEl) this.contentEl.empty();
   }
 
@@ -1209,6 +1810,12 @@ class SecretVaultView extends ItemView {
     if (!this.plugin.cryptoApi) {
       root.createDiv({ cls: 'xsv-title', text: this.plugin.t('view_title') });
       root.createDiv({ cls: 'xsv-error', text: this.plugin.t('err_crypto_unavailable') });
+      return;
+    }
+
+    // 创建后的恢复码一次性展示步骤优先于解锁态（未点「我已保存」不得进入主界面）
+    if (this.setupStep === 'recoveryCode') {
+      this.renderSetup(root);
       return;
     }
 
@@ -1310,16 +1917,31 @@ class SecretVaultView extends ItemView {
     const card = root.createDiv({ cls: 'xsv-page-card' });
     card.createDiv({ cls: 'xsv-title', text: this.plugin.t('setup_title') });
     card.createDiv({ cls: 'xsv-desc', text: this.plugin.t('setup_desc') });
-    const password = this.createPasswordField(card, this.plugin.t('label_password'), () => submit());
-    const confirm = this.createPasswordField(card, this.plugin.t('label_confirm_password'), () => submit());
+    if (this.setupStep === 'questions') {
+      this.renderSetupQuestions(card);
+      return;
+    }
+    if (this.setupStep === 'recoveryCode') {
+      this.renderSetupRecoveryCode(card);
+      return;
+    }
+    const password = this.createPasswordField(card, this.plugin.t('label_password'), () => next());
+    const confirm = this.createPasswordField(card, this.plugin.t('label_confirm_password'), () => next());
+    if (this.setupPassword) password.value = this.setupPassword;
+    attachStrengthMeter(card, this.plugin, password);
     this.renderError(card);
     const actions = card.createDiv({ cls: 'xsv-actions xsv-actions-start' });
-    const createButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('btn_create') });
+    const nextButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('setup_next') });
 
-    const submit = async () => {
+    const next = () => {
       const value = password.value;
       if (!value) {
         this.uiError = this.plugin.t('err_password_required');
+        this.render();
+        return;
+      }
+      if (value.length < MIN_MASTER_PASSWORD_LENGTH) {
+        this.uiError = this.plugin.t('err_new_password_short');
         this.render();
         return;
       }
@@ -1328,21 +1950,182 @@ class SecretVaultView extends ItemView {
         this.render();
         return;
       }
-      this.uiError = '';
-      try {
-        await this.plugin.createVault(value);
-        this.plugin.vaultState = 'present';
-        new Notice(this.plugin.t('notice_vault_created'), 3000);
+      const go = () => {
+        this.setupPassword = value;
+        this.uiError = '';
+        this.setupStep = 'questions';
         this.render();
-      } catch (error) {
-        console.error('[' + PLUGIN_ID + '] create vault failed:', error);
-        this.uiError = this.plugin.t('err_generic', { msg: errorMessage(error) });
-        this.render();
+      };
+      const estimate = this.plugin.evaluatePasswordStrength(value);
+      if (estimate.tier === 'danger') {
+        new ConfirmModal(
+          this.app,
+          this.plugin.t('strength_confirm_title'),
+          this.plugin.t('strength_confirm_desc', { single: estimate.singleText, cluster: estimate.clusterText }),
+          this.plugin.t('btn_continue'),
+          this.plugin.t('btn_cancel'),
+          go
+        ).open();
+        return;
       }
+      go();
     };
 
-    createButton.addEventListener('click', () => void submit());
+    nextButton.addEventListener('click', () => next());
     card.createDiv({ cls: 'xsv-hint', text: this.plugin.t('hint_locked_state') });
+  }
+
+  renderSetupQuestions(card) {
+    card.createDiv({ cls: 'xsv-title xsv-setup-step-title', text: this.plugin.t('setup_questions_title') });
+    card.createDiv({ cls: 'xsv-desc', text: this.plugin.t('setup_questions_desc') });
+    const rows = card.createDiv({ cls: 'xsv-question-list' });
+    for (let index = 0; index < RECOVERY_QUESTIONS_COUNT; index += 1) {
+      const row = rows.createDiv({ cls: 'xsv-question-row' });
+      row.createDiv({ cls: 'xsv-label', text: this.plugin.t('recovery_question_label', { index: index + 1 }) });
+      const select = row.createEl('select', { cls: 'xsv-input' });
+      select.createEl('option', { value: '', text: this.plugin.t('btn_choose_placeholder') });
+      for (let preset = 1; preset <= 3; preset += 1) {
+        select.createEl('option', {
+          value: this.plugin.t('question_preset_' + preset),
+          text: this.plugin.t('question_preset_' + preset),
+        });
+      }
+      select.createEl('option', { value: '__custom__', text: this.plugin.t('question_custom') });
+      const customInput = row.createEl('input', { cls: 'xsv-input xsv-question-custom', type: 'text' });
+      customInput.placeholder = this.plugin.t('question_custom');
+      customInput.classList.add('xsv-hidden');
+      const answerInput = row.createEl('input', {
+        cls: 'xsv-input',
+        type: 'text',
+        placeholder: this.plugin.t('recovery_answer_label', { index: index + 1 }),
+      });
+      answerInput.value = this.setupAnswers[index] || '';
+      const existing = this.setupQuestions[index] || '';
+      if (existing) {
+        const presetMatch = [1, 2, 3].find((preset) => this.plugin.t('question_preset_' + preset) === existing);
+        if (presetMatch) select.value = existing;
+        else {
+          select.value = '__custom__';
+          customInput.classList.remove('xsv-hidden');
+          customInput.value = existing;
+        }
+      }
+      select.addEventListener('change', () => {
+        customInput.classList.toggle('xsv-hidden', select.value !== '__custom__');
+      });
+      this.setupQuestionControls = this.setupQuestionControls || [];
+      this.setupQuestionControls[index] = { select, customInput, answerInput };
+    }
+    card.createDiv({ cls: 'xsv-hint', text: this.plugin.t('setup_questions_skip_hint') });
+    this.renderError(card);
+    const actions = card.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    const back = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('setup_back') });
+    const skip = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_skip_recovery') });
+    const create = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('btn_create') });
+    back.addEventListener('click', () => {
+      this.setupStep = 'password';
+      this.uiError = '';
+      this.render();
+    });
+    skip.addEventListener('click', () => {
+      new ConfirmModal(
+        this.app,
+        this.plugin.t('btn_skip_recovery'),
+        this.plugin.t('confirm_skip_recovery'),
+        this.plugin.t('btn_continue'),
+        this.plugin.t('btn_cancel'),
+        () => void this.finishSetup(false)
+      ).open();
+    });
+    create.addEventListener('click', () => void this.finishSetup(true));
+  }
+
+  collectSetupQuestions() {
+    const questions = [];
+    const answers = [];
+    let filledQuestions = 0;
+    for (let index = 0; index < RECOVERY_QUESTIONS_COUNT; index += 1) {
+      const controls = (this.setupQuestionControls || [])[index] || {};
+      const select = controls.select;
+      const customInput = controls.customInput;
+      const answerInput = controls.answerInput;
+      let question = '';
+      if (select && select.value && select.value !== '__custom__') question = select.value;
+      else if (select && select.value === '__custom__' && customInput) question = customInput.value;
+      const answer = answerInput ? answerInput.value : '';
+      if (question) filledQuestions += 1;
+      questions.push(question);
+      answers.push(answer);
+    }
+    return { questions, answers, filledQuestions };
+  }
+
+  async finishSetup(withQuestions) {
+    if (this.setupBusy) return;
+    if (withQuestions) {
+      const collected = this.collectSetupQuestions();
+      if (collected.filledQuestions !== RECOVERY_QUESTIONS_COUNT) {
+        this.uiError = this.plugin.t('err_recovery_questions_count');
+        this.render();
+        return;
+      }
+      if (collected.answers.some((answer) => normalizeSecurityAnswer(answer).length < SECURITY_ANSWER_MIN)) {
+        this.uiError = this.plugin.t('err_recovery_answer_short');
+        this.render();
+        return;
+      }
+      this.setupQuestions = collected.questions;
+      this.setupAnswers = collected.answers;
+    }
+    this.setupBusy = true;
+    this.uiError = '';
+    try {
+      const result = await this.plugin.createVault(
+        this.setupPassword,
+        withQuestions ? { questions: this.setupQuestions, answers: this.setupAnswers } : {}
+      );
+      this.plugin.vaultState = 'present';
+      this.setupRecoveryCode = result && result.recoveryCode ? result.recoveryCode : '';
+      this.setupStep = 'recoveryCode';
+      this.setupBusy = false;
+      new Notice(this.plugin.t('notice_vault_created'), 3000);
+      this.render();
+    } catch (error) {
+      this.setupBusy = false;
+      console.error('[' + PLUGIN_ID + '] create vault failed:', error);
+      this.uiError = this.plugin.t('err_generic', { msg: errorMessage(error) });
+      this.render();
+    }
+  }
+
+  renderSetupRecoveryCode(card) {
+    card.createDiv({ cls: 'xsv-title xsv-setup-step-title', text: this.plugin.t('setup_code_title') });
+    card.createDiv({ cls: 'xsv-desc', text: this.plugin.t('setup_code_desc') });
+    const codeEl = card.createDiv({ cls: 'xsv-recovery-code', text: this.setupRecoveryCode });
+    card.createDiv({ cls: 'xsv-hint', text: this.plugin.t('recovery_code_warning') });
+    const actions = card.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    const copy = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_copy_recovery_code') });
+    const saved = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('btn_saved_recovery_code') });
+    copy.addEventListener('click', async () => {
+      const code = this.setupRecoveryCode;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(code);
+          new Notice(this.plugin.t('notice_cell_copied'), 3000);
+        }
+      } catch (error) {
+        console.error('[' + PLUGIN_ID + '] copy recovery code failed:', error);
+      }
+    });
+    saved.addEventListener('click', () => {
+      // 一次性展示结束：立即从视图状态中清除，之后无法再从插件取回
+      this.setupRecoveryCode = '';
+      this.setupPassword = '';
+      this.setupQuestions = ['', '', ''];
+      this.setupAnswers = ['', '', ''];
+      this.setupStep = 'password';
+      this.render();
+    });
   }
 
   renderUnlock(root) {
@@ -1355,6 +2138,14 @@ class SecretVaultView extends ItemView {
     this.renderError(card);
     const actions = card.createDiv({ cls: 'xsv-actions xsv-actions-start' });
     const unlockButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: this.plugin.t('btn_unlock') });
+    const forgotButton = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_forgot_password') });
+    forgotButton.addEventListener('click', () => {
+      new ForgotPasswordModal(this.app, this.plugin, () => {
+        this.masked = false;
+        this.plugin.vaultState = 'present';
+        this.render();
+      }).open();
+    });
 
     const submit = async () => {
       const value = password.value;
@@ -1410,9 +2201,24 @@ class SecretVaultView extends ItemView {
     // 冲突后内存快照已过期：必须重载才能继续编辑，避免基于旧数据再次另存副本
     // 查看冲突副本时同样只读：副本上的改动不会写回正式库
     const copyReadOnly = this.plugin.isReadOnlyCopy();
-    const readOnly = !!this.plugin.conflictPending || copyReadOnly;
+    const readOnly = !!this.plugin.conflictPending || copyReadOnly || !!this.plugin.batchActive;
+    if (this.plugin.batchActive && this.plugin.batch) {
+      const banner = root.createDiv({ cls: 'xsv-batch-banner' });
+      banner.createDiv({
+        cls: 'xsv-batch-title',
+        text: this.plugin.t('batch_title') + ' ' + this.plugin.batch.current + '/' + this.plugin.batch.total,
+      });
+      banner.createDiv({
+        cls: 'xsv-hint',
+        text: this.plugin.t('batch_progress', {
+          current: this.plugin.batch.current,
+          total: this.plugin.batch.total,
+          name: this.plugin.batch.path || '',
+        }),
+      });
+    }
     if (copyReadOnly) this.renderCopyReadonlyBanner(root);
-    else if (readOnly) this.renderConflictBanner(root);
+    else if (!this.plugin.batchActive && readOnly) this.renderConflictBanner(root);
 
     // 0.3.0 起界面只有笔记：条目列表与 CRUD 入口全部下线；0.3.1 起引用语法取消，entries 仅原样保留
     const layout = root.createDiv({ cls: 'xsv-layout' });
@@ -1429,6 +2235,7 @@ class SecretVaultView extends ItemView {
       cls: 'xsv-btn xsv-btn-small xsv-btn-primary',
       text: this.plugin.t('btn_new_file'),
     });
+    if (this.plugin.batchActive) newButton.disabled = true;
     newButton.addEventListener('click', () => {
       if (!this.plugin.isUnlocked()) return;
       new FileFormModal(this.plugin.app, this.plugin, { mode: 'create' }).open();
@@ -2062,6 +2869,366 @@ class ConfirmModal extends Modal {
   }
 }
 
+function buildQuestionControls(container, plugin, questions, answers) {
+  const controls = [];
+  const list = container.createDiv({ cls: 'xsv-question-list' });
+  for (let index = 0; index < RECOVERY_QUESTIONS_COUNT; index += 1) {
+    const row = list.createDiv({ cls: 'xsv-question-row' });
+    row.createDiv({ cls: 'xsv-label', text: plugin.t('recovery_question_label', { index: index + 1 }) });
+    const select = row.createEl('select', { cls: 'xsv-input' });
+    select.createEl('option', { value: '', text: plugin.t('btn_choose_placeholder') });
+    for (let preset = 1; preset <= 3; preset += 1) {
+      select.createEl('option', {
+        value: plugin.t('question_preset_' + preset),
+        text: plugin.t('question_preset_' + preset),
+      });
+    }
+    select.createEl('option', { value: '__custom__', text: plugin.t('question_custom') });
+    const customInput = row.createEl('input', { cls: 'xsv-input xsv-question-custom', type: 'text' });
+    customInput.placeholder = plugin.t('question_custom');
+    customInput.classList.add('xsv-hidden');
+    const answerInput = row.createEl('input', {
+      cls: 'xsv-input',
+      type: 'text',
+      placeholder: plugin.t('recovery_answer_label', { index: index + 1 }),
+    });
+    const existingQuestion = (questions || [])[index] || '';
+    if (existingQuestion) {
+      const presetMatch = [1, 2, 3].find((preset) => plugin.t('question_preset_' + preset) === existingQuestion);
+      if (presetMatch) select.value = existingQuestion;
+      else {
+        select.value = '__custom__';
+        customInput.classList.remove('xsv-hidden');
+        customInput.value = existingQuestion;
+      }
+    }
+    answerInput.value = (answers || [])[index] || '';
+    select.addEventListener('change', () => {
+      customInput.classList.toggle('xsv-hidden', select.value !== '__custom__');
+    });
+    controls.push({ select, customInput, answerInput });
+  }
+  const collect = () => {
+    const outQuestions = [];
+    const outAnswers = [];
+    let filled = 0;
+    for (const control of controls) {
+      let question = '';
+      if (control.select.value && control.select.value !== '__custom__') question = control.select.value;
+      else if (control.select.value === '__custom__') question = control.customInput.value;
+      if (question) filled += 1;
+      outQuestions.push(question);
+      outAnswers.push(control.answerInput.value);
+    }
+    return { questions: outQuestions, answers: outAnswers, filled };
+  };
+  return { controls, collect };
+}
+
+/* 修改主密码：快速改密 / 彻底轮换两档，批量覆盖全部文件 */
+class ChangePasswordModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  onOpen() {
+    const t = (key, params) => this.plugin.t(key, params);
+    this.titleEl.setText(t('change_pw_title'));
+    const current = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'password' });
+    current.placeholder = t('change_pw_current');
+    current.autocomplete = 'current-password';
+    const next = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'password' });
+    next.placeholder = t('change_pw_new');
+    next.autocomplete = 'new-password';
+    attachStrengthMeter(this.contentEl, this.plugin, next);
+    const confirm = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'password' });
+    confirm.placeholder = t('change_pw_confirm');
+    confirm.autocomplete = 'new-password';
+    const modeRow = this.contentEl.createDiv({ cls: 'xsv-mode-row' });
+    modeRow.createDiv({ cls: 'xsv-label', text: t('change_pw_mode') });
+    const mode = modeRow.createEl('select', { cls: 'xsv-input' });
+    mode.createEl('option', { value: 'quick', text: t('change_pw_mode_quick') });
+    mode.createEl('option', { value: 'full', text: t('change_pw_mode_full') });
+    const modeNote = this.contentEl.createDiv({ cls: 'xsv-hint', text: t('change_pw_quick_note') });
+    mode.addEventListener('change', () => {
+      modeNote.setText(mode.value === 'full' ? t('change_pw_full_note') : t('change_pw_quick_note'));
+    });
+    const error = this.contentEl.createDiv({ cls: 'xsv-error' });
+    const progress = this.contentEl.createDiv({ cls: 'xsv-hint xsv-batch-progress' });
+    const actions = this.contentEl.createDiv({ cls: 'xsv-modal-actions' });
+    const cancel = actions.createEl('button', { cls: 'xsv-btn', text: t('btn_cancel') });
+    cancel.addEventListener('click', () => this.close());
+    const submit = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: t('btn_change_password') });
+
+    const run = async () => {
+      error.setText('');
+      submit.disabled = true;
+      try {
+        await this.plugin.changeMasterPassword(current.value, next.value, {
+          mode: mode.value === 'full' ? 'full' : 'quick',
+          onProgress: (batch) => {
+            progress.setText(
+              t('change_pw_progress', { current: batch.current, total: batch.total })
+            );
+          },
+        });
+        new Notice(t('notice_password_changed'), 5000);
+        this.close();
+      } catch (changeError) {
+        progress.setText('');
+        error.setText(errorMessage(changeError));
+      } finally {
+        submit.disabled = false;
+      }
+    };
+
+    submit.addEventListener('click', () => {
+      if (!current.value) {
+        error.setText(t('err_old_password_wrong'));
+        return;
+      }
+      if (String(next.value || '').length < MIN_MASTER_PASSWORD_LENGTH) {
+        error.setText(t('err_new_password_short'));
+        return;
+      }
+      if (next.value !== confirm.value) {
+        error.setText(t('err_password_mismatch'));
+        return;
+      }
+      const estimate = this.plugin.evaluatePasswordStrength(next.value);
+      if (estimate.tier === 'danger') {
+        new ConfirmModal(
+          this.app,
+          t('strength_confirm_title'),
+          t('strength_confirm_desc', { single: estimate.singleText, cluster: estimate.clusterText }),
+          t('btn_continue'),
+          t('btn_cancel'),
+          () => void run()
+        ).open();
+        return;
+      }
+      void run();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/* 设置/修改三个密保问题：要求当前主密码 */
+class RecoveryQuestionsModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  onOpen() {
+    const t = (key, params) => this.plugin.t(key, params);
+    this.titleEl.setText(t('recovery_title'));
+    this.contentEl.createEl('p', { cls: 'xsv-desc', text: t('recovery_desc') });
+    const current = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'password' });
+    current.placeholder = t('change_pw_current');
+    const existing = this.plugin.sessionRecovery;
+    const builder = buildQuestionControls(
+      this.contentEl,
+      this.plugin,
+      existing ? existing.questions : [],
+      []
+    );
+    this.contentEl.createDiv({ cls: 'xsv-hint', text: t('recovery_answer_hint') });
+    const error = this.contentEl.createDiv({ cls: 'xsv-error' });
+    const actions = this.contentEl.createDiv({ cls: 'xsv-modal-actions' });
+    const cancel = actions.createEl('button', { cls: 'xsv-btn', text: t('btn_cancel') });
+    cancel.addEventListener('click', () => this.close());
+    const save = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: t('btn_save_recovery') });
+    save.addEventListener('click', async () => {
+      if (!current.value) {
+        error.setText(t('err_current_password_wrong'));
+        return;
+      }
+      const collected = builder.collect();
+      if (collected.filled !== RECOVERY_QUESTIONS_COUNT) {
+        error.setText(t('err_recovery_questions_count'));
+        return;
+      }
+      if (collected.answers.some((answer) => normalizeSecurityAnswer(answer).length < SECURITY_ANSWER_MIN)) {
+        error.setText(t('err_recovery_answer_short'));
+        return;
+      }
+      save.disabled = true;
+      try {
+        await this.plugin.setRecoveryQuestions(current.value, collected.questions, collected.answers);
+        new Notice(t('notice_recovery_saved'), 5000);
+        this.close();
+      } catch (saveError) {
+        error.setText(errorMessage(saveError));
+      } finally {
+        save.disabled = false;
+      }
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/* 忘记主密码：恢复码 / 三道密保问题 → 强制设置新主密码 */
+class ForgotPasswordModal extends Modal {
+  constructor(app, plugin, onDone) {
+    super(app);
+    this.plugin = plugin;
+    this.onDone = onDone;
+    this.step = 'risk';
+    this.questions = [];
+    this.completed = false;
+  }
+
+  onOpen() {
+    this.render();
+  }
+
+  render() {
+    const t = (key, params) => this.plugin.t(key, params);
+    this.titleEl.setText(t('forgot_title'));
+    this.contentEl.empty();
+    const error = this.contentEl.createDiv({ cls: 'xsv-error' });
+    if (this.step === 'risk') {
+      this.contentEl.createEl('p', { cls: 'xsv-desc', text: t('forgot_risk') });
+      this.contentEl.createDiv({ cls: 'xsv-hint', text: t('err_recovery_unavailable_hint') });
+      const actions = this.contentEl.createDiv({ cls: 'xsv-modal-actions' });
+      const cancel = actions.createEl('button', { cls: 'xsv-btn', text: t('btn_cancel') });
+      cancel.addEventListener('click', () => this.close());
+      const code = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: t('forgot_choose_code') });
+      code.addEventListener('click', () => {
+        this.step = 'code';
+        this.render();
+      });
+      const questions = actions.createEl('button', { cls: 'xsv-btn', text: t('forgot_choose_questions') });
+      questions.addEventListener('click', async () => {
+        const source = await this.plugin.findRecoverySource('questions');
+        if (!source) {
+          error.setText(t('err_recovery_unavailable'));
+          this.contentEl.createDiv({ cls: 'xsv-hint', text: t('err_recovery_unavailable_hint') });
+          return;
+        }
+        this.questions = source.envelope.recovery.questions.slice();
+        this.step = 'questions';
+        this.render();
+      });
+      return;
+    }
+    if (this.step === 'code') {
+      const input = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'text' });
+      input.placeholder = t('forgot_code_label');
+      this.contentEl.createDiv({ cls: 'xsv-hint', text: t('forgot_code_hint') });
+      const actions = this.contentEl.createDiv({ cls: 'xsv-modal-actions' });
+      const back = actions.createEl('button', { cls: 'xsv-btn', text: t('setup_back') });
+      back.addEventListener('click', () => {
+        this.step = 'risk';
+        this.render();
+      });
+      const submit = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: t('btn_recover_now') });
+      submit.addEventListener('click', async () => {
+        submit.disabled = true;
+        const result = await this.plugin.recoverWithCode(input.value);
+        submit.disabled = false;
+        if (!result.ok) {
+          error.setText(result.code === 'unavailable' ? t('err_recovery_unavailable') : t('err_recovery_failed'));
+          return;
+        }
+        this.step = 'password';
+        this.render();
+      });
+      return;
+    }
+    if (this.step === 'questions') {
+      const inputs = [];
+      for (let index = 0; index < RECOVERY_QUESTIONS_COUNT; index += 1) {
+        this.contentEl.createDiv({ cls: 'xsv-label', text: this.questions[index] || '' });
+        const input = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'text' });
+        input.placeholder = t('forgot_answer_label', { index: index + 1 });
+        inputs.push(input);
+      }
+      const actions = this.contentEl.createDiv({ cls: 'xsv-modal-actions' });
+      const back = actions.createEl('button', { cls: 'xsv-btn', text: t('setup_back') });
+      back.addEventListener('click', () => {
+        this.step = 'risk';
+        this.render();
+      });
+      const submit = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: t('btn_recover_now') });
+      submit.addEventListener('click', async () => {
+        submit.disabled = true;
+        const result = await this.plugin.recoverWithQuestions(inputs.map((input) => input.value));
+        submit.disabled = false;
+        if (!result.ok) {
+          // 不区分第几题错，一律同一句文案
+          error.setText(result.code === 'unavailable' ? t('err_recovery_unavailable') : t('err_recovery_failed'));
+          return;
+        }
+        this.step = 'password';
+        this.render();
+      });
+      return;
+    }
+    // 设置新主密码
+    this.contentEl.createEl('p', { cls: 'xsv-desc', text: t('forgot_new_password_desc') });
+    const password = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'password' });
+    password.placeholder = t('change_pw_new');
+    password.autocomplete = 'new-password';
+    attachStrengthMeter(this.contentEl, this.plugin, password);
+    const confirm = this.contentEl.createEl('input', { cls: 'xsv-input', type: 'password' });
+    confirm.placeholder = t('change_pw_confirm');
+    confirm.autocomplete = 'new-password';
+    const actions = this.contentEl.createDiv({ cls: 'xsv-modal-actions' });
+    const submit = actions.createEl('button', { cls: 'xsv-btn xsv-btn-primary', text: t('btn_reset_password') });
+    const run = async () => {
+      submit.disabled = true;
+      try {
+        await this.plugin.completeRecoveryPassword(password.value);
+        this.completed = true;
+        new Notice(t('notice_recovery_reset'), 12000);
+        this.close();
+        if (typeof this.onDone === 'function') this.onDone();
+      } catch (resetError) {
+        error.setText(errorMessage(resetError));
+      } finally {
+        submit.disabled = false;
+      }
+    };
+    submit.addEventListener('click', () => {
+      if (password.value.length < MIN_MASTER_PASSWORD_LENGTH) {
+        error.setText(t('err_new_password_short'));
+        return;
+      }
+      if (password.value !== confirm.value) {
+        error.setText(t('err_password_mismatch'));
+        return;
+      }
+      const estimate = this.plugin.evaluatePasswordStrength(password.value);
+      if (estimate.tier === 'danger') {
+        new ConfirmModal(
+          this.app,
+          t('strength_confirm_title'),
+          t('strength_confirm_desc', { single: estimate.singleText, cluster: estimate.clusterText }),
+          t('btn_continue'),
+          t('btn_cancel'),
+          () => void run()
+        ).open();
+        return;
+      }
+      void run();
+    });
+  }
+
+  onClose() {
+    if (!this.completed) this.plugin.pendingRecovery = null;
+    this.contentEl.empty();
+  }
+}
+
 /* 新建 / 重命名保险库文件：名称 + 已有分组下拉，或直接输入新分组 */
 class FileFormModal extends Modal {
   constructor(app, plugin, options) {
@@ -2144,6 +3311,21 @@ class XUSecretVault extends Plugin {
   sessionKey = null;
   sessionSalt = null;
   sessionIterations = KDF_ITERATIONS;
+  // v3：sessionKey = DEK（内容密钥）；sessionKek = 主密码包裹密钥
+  sessionKek = null;
+  rawDek = null;
+  rawMasterKey = null;
+  sessionFileId = null;
+  sessionFileIdBase64 = '';
+  sessionFormatVersion = FORMAT_VERSION;
+  sessionRecovery = null;
+  sessionRecoveryCode = null;
+  sessionLegacyKey = null;
+  batch = null;
+  batchActive = false;
+  batchAbortRequested = false;
+  lastBatchResult = null;
+  pendingRecovery = null;
   entries = [];
   notes = [];
   contentVersion = 0;
@@ -2466,6 +3648,15 @@ class XUSecretVault extends Plugin {
     const saltBase64 = bytesToBase64(this.sessionSalt);
     this.fileSessions.set(this.normalizeVaultPath(this.selectedFilePath), {
       key: this.sessionKey,
+      kek: this.sessionKek,
+      rawDek: this.rawDek,
+      rawMasterKey: this.rawMasterKey,
+      fileId: this.sessionFileId,
+      fileIdBase64: this.sessionFileIdBase64,
+      formatVersion: this.sessionFormatVersion,
+      legacyKey: this.sessionLegacyKey,
+      recovery: this.sessionRecovery,
+      recoveryCode: this.sessionRecoveryCode,
       salt: this.sessionSalt,
       saltBase64,
       iterations: this.sessionIterations,
@@ -2473,6 +3664,66 @@ class XUSecretVault extends Plugin {
       conflictPending: this.conflictPending,
       conflictPath: this.conflictPath,
     });
+  }
+
+  // 当前会话的 v3 写入上下文
+  currentV3Context() {
+    if (!this.rawDek || !this.sessionKek || !this.sessionSalt || !this.sessionFileId) {
+      throw new Error(this.t('err_session_expired'));
+    }
+    return {
+      rawDek: this.rawDek,
+      kek: this.sessionKek,
+      salt: this.sessionSalt,
+      iterations: this.sessionIterations,
+      fileId: this.sessionFileId,
+      rawMasterKey: this.rawMasterKey,
+      recovery: this.sessionRecovery,
+      recoveryCode: this.sessionRecoveryCode,
+    };
+  }
+
+  // 把一个已解密/已构造的 v3 会话装进当前插件状态
+  async applyV3Session(session) {
+    const cryptoObj = this.requireCrypto();
+    this.sessionFormatVersion = FORMAT_VERSION;
+    this.sessionLegacyKey = null;
+    this.rawDek = session.rawDek;
+    this.rawMasterKey = session.rawMasterKey;
+    this.sessionKek = session.kek;
+    this.sessionSalt = session.salt;
+    this.sessionIterations = session.iterations;
+    this.sessionFileId = session.fileId;
+    this.sessionFileIdBase64 = session.fileIdBase64;
+    this.sessionRecovery = session.recovery || null;
+    this.sessionRecoveryCode = session.recoveryCode || null;
+    this.sessionKey = await importAesGcmKey(cryptoObj, session.rawDek);
+    this.entries = session.data.entries || [];
+    this.notes = session.data.notes || [];
+    this.contentVersion = Number(session.data.contentVersion || 0);
+    this.knownBlobHash = session.hash != null ? session.hash : null;
+    this.sessionPassword = session.password;
+  }
+
+  // legacy 会话（迁移失败时仍可继续读写旧格式）
+  applyLegacySession(session) {
+    this.sessionFormatVersion = Number(session.formatVersion);
+    this.sessionLegacyKey = session.key;
+    this.sessionKey = session.key;
+    this.rawDek = null;
+    this.rawMasterKey = null;
+    this.sessionKek = null;
+    this.sessionSalt = session.salt;
+    this.sessionIterations = session.iterations;
+    this.sessionFileId = null;
+    this.sessionFileIdBase64 = '';
+    this.sessionRecovery = session.recovery || null;
+    this.sessionRecoveryCode = session.recoveryCode || null;
+    this.entries = session.data.entries || [];
+    this.notes = session.data.notes || [];
+    this.contentVersion = Number(session.data.contentVersion || 0);
+    this.knownBlobHash = session.hash != null ? session.hash : null;
+    this.sessionPassword = session.password;
   }
 
   // 递归扫描保险库目录下所有 .enc（含子目录），外加旧版 <vault>/xu-secrets.enc
@@ -2652,11 +3903,11 @@ class XUSecretVault extends Plugin {
 
   /* ---------------- 加密原语 ---------------- */
 
-  async deriveKey(password, salt, iterations) {
+  async deriveKeyFromText(text, salt, iterations) {
     const cryptoObj = this.requireCrypto();
     const material = await cryptoObj.subtle.importKey(
       'raw',
-      utf8Encode(normalizePassword(password)),
+      utf8Encode(text),
       { name: 'PBKDF2' },
       false,
       ['deriveKey']
@@ -2670,19 +3921,24 @@ class XUSecretVault extends Plugin {
     );
   }
 
+  async deriveKey(password, salt, iterations) {
+    return this.deriveKeyFromText(normalizePassword(password), salt, iterations);
+  }
+
   async hashText(text) {
     const cryptoObj = this.requireCrypto();
     const digest = await cryptoObj.subtle.digest('SHA-256', utf8Encode(text));
     return bytesToBase64(digest);
   }
 
-  async encryptToEnvelope(entries, key, salt, iterations, notes) {
+  // v2 旧信封：仅用于迁移失败后继续以旧格式工作的后备路径
+  async encryptLegacyToEnvelope(entries, key, salt, iterations, notes) {
     const cryptoObj = this.requireCrypto();
     const iv = randomBytes(cryptoObj, IV_BYTES);
     const saltBase64 = bytesToBase64(salt);
-    // updatedAt 与笔记体都放进加密载荷，不在信封头上明文暴露；信封版本不变，仅新增文档结构版本
+    // updatedAt 与笔记体都放进加密载荷，不在信封头上明文暴露
     const plaintext = JSON.stringify({
-      version: FORMAT_VERSION,
+      version: V2_FORMAT_VERSION,
       contentVersion: CONTENT_VERSION,
       updatedAt: new Date().toISOString(),
       entries,
@@ -2694,7 +3950,7 @@ class XUSecretVault extends Plugin {
         iv,
         additionalData: buildAad(
           AAD_PREFIX,
-          FORMAT_VERSION,
+          V2_FORMAT_VERSION,
           KDF_ALGO,
           iterations,
           saltBase64,
@@ -2706,32 +3962,160 @@ class XUSecretVault extends Plugin {
       utf8Encode(plaintext)
     );
     return {
-      formatVersion: FORMAT_VERSION,
-      kdf: {
-        algo: KDF_ALGO,
-        iterations,
-        salt: saltBase64,
-      },
-      cipher: {
-        algo: CIPHER_ALGO,
-        iv: bytesToBase64(iv),
-      },
+      formatVersion: V2_FORMAT_VERSION,
+      kdf: { algo: KDF_ALGO, iterations, salt: saltBase64 },
+      cipher: { algo: CIPHER_ALGO, iv: bytesToBase64(iv) },
       payload: bytesToBase64(ciphertext),
     };
+  }
+
+  async questionTextHash(questions) {
+    const cryptoObj = this.requireCrypto();
+    const digest = await cryptoObj.subtle.digest(
+      'SHA-256',
+      utf8Encode((questions || []).map(normalizeQuestionText).join('\n'))
+    );
+    return bytesToBase64(digest);
+  }
+
+  async buildRecoveryBlock(rawMasterKey, questions, answers) {
+    const cryptoObj = this.requireCrypto();
+    const salt = randomBytes(cryptoObj, SALT_BYTES);
+    const iterations = RECOVERY_KDF_ITERATIONS;
+    const saltBase64 = bytesToBase64(salt);
+    const normalizedQuestions = (questions || []).map(normalizeQuestionText);
+    const answerKey = await this.deriveKeyFromText(
+      joinSecurityAnswers(answers),
+      salt,
+      iterations
+    );
+    const qHash = await this.questionTextHash(normalizedQuestions);
+    const wrappedDek = await wrapRawKey(
+      cryptoObj,
+      answerKey,
+      rawMasterKey,
+      buildWrapAadV3('recovery', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO, qHash)
+    );
+    return {
+      kdf: { algo: KDF_ALGO, iterations, salt: saltBase64 },
+      questions: normalizedQuestions,
+      wrappedDek,
+    };
+  }
+
+  async buildRecoveryCodeBlock(rawMasterKey, code) {
+    const cryptoObj = this.requireCrypto();
+    const salt = randomBytes(cryptoObj, SALT_BYTES);
+    const iterations = RECOVERY_CODE_KDF_ITERATIONS;
+    const saltBase64 = bytesToBase64(salt);
+    const codeKey = await this.deriveKeyFromText(
+      normalizeRecoveryCode(code),
+      salt,
+      iterations
+    );
+    const wrappedDek = await wrapRawKey(
+      cryptoObj,
+      codeKey,
+      rawMasterKey,
+      buildWrapAadV3('recovery-code', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+    );
+    return {
+      kdf: { algo: KDF_ALGO, iterations, salt: saltBase64 },
+      wrappedDek,
+    };
+  }
+
+  // v3 信封：payload 用 DEK；DEK 同时被主密码 KEK 与主密钥包裹；
+  // 主密钥再被密保答案 / 恢复码包裹，因此恢复一次即可覆盖全部文件。
+  async buildV3Envelope(entries, notes, ctx) {
+    const cryptoObj = this.requireCrypto();
+    const saltBase64 = bytesToBase64(ctx.salt);
+    const fileIdBase64 =
+      typeof ctx.fileId === 'string' ? ctx.fileId : bytesToBase64(ctx.fileId);
+    const iterations = Number(ctx.iterations);
+    const dekKey = await importAesGcmKey(cryptoObj, ctx.rawDek);
+    const masterKey = await importAesGcmKey(cryptoObj, ctx.rawMasterKey);
+    let ivBase64;
+    let payloadBase64;
+    if (ctx.payloadReuse && typeof ctx.payloadReuse.payload === 'string') {
+      // 快速改密：DEK 不变、内容不重加密，仅换 salt/KEK 重包包裹层
+      ivBase64 = String(ctx.payloadReuse.iv);
+      payloadBase64 = String(ctx.payloadReuse.payload);
+    } else {
+      const iv = randomBytes(cryptoObj, IV_BYTES);
+      const plaintext = JSON.stringify({
+        contentVersion: CONTENT_VERSION,
+        updatedAt: new Date().toISOString(),
+        entries,
+        notes: notes || [],
+      });
+      const ciphertext = await cryptoObj.subtle.encrypt(
+        {
+          name: 'AES-GCM',
+          iv,
+          additionalData: buildPayloadAadV3(FORMAT_VERSION, fileIdBase64, CIPHER_ALGO),
+          tagLength: TAG_LENGTH,
+        },
+        dekKey,
+        utf8Encode(plaintext)
+      );
+      ivBase64 = bytesToBase64(iv);
+      payloadBase64 = bytesToBase64(ciphertext);
+    }
+    const wrappedDek = await wrapRawKey(
+      cryptoObj,
+      ctx.kek,
+      ctx.rawDek,
+      buildWrapAadV3('password', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+    );
+    const wrappedMasterKey = await wrapRawKey(
+      cryptoObj,
+      ctx.kek,
+      ctx.rawMasterKey,
+      buildWrapAadV3('master', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+    );
+    const wrappedDekByMaster = await wrapRawKey(
+      cryptoObj,
+      masterKey,
+      ctx.rawDek,
+      buildMasterDekAad(fileIdBase64, CIPHER_ALGO)
+    );
+    const envelope = {
+      formatVersion: FORMAT_VERSION,
+      fileId: fileIdBase64,
+      kdf: { algo: KDF_ALGO, iterations, salt: saltBase64 },
+      cipher: { algo: CIPHER_ALGO, iv: ivBase64 },
+      wrappedDek,
+      wrappedMasterKey,
+      wrappedDekByMaster,
+      payload: payloadBase64,
+    };
+    if (ctx.recovery) envelope.recovery = ctx.recovery;
+    if (ctx.recoveryCode) envelope.recoveryCode = ctx.recoveryCode;
+    return envelope;
   }
 
   validateEnvelope(envelope) {
     if (!envelope || typeof envelope !== 'object') throw new Error('invalid envelope');
     const formatVersion = Number(envelope.formatVersion);
     // 已知版本之外一律报「版本不支持」，不要混成密码错误
-    if (formatVersion !== FORMAT_VERSION && formatVersion !== LEGACY_FORMAT_VERSION) {
+    if (
+      formatVersion !== FORMAT_VERSION &&
+      formatVersion !== V2_FORMAT_VERSION &&
+      formatVersion !== LEGACY_FORMAT_VERSION
+    ) {
       const error = new Error('unsupported formatVersion');
       error.code = 'xsv-version-unsupported';
       throw error;
     }
     if (!envelope.kdf || typeof envelope.kdf !== 'object') throw new Error('invalid kdf');
     if (envelope.kdf.algo !== KDF_ALGO) throw new Error('invalid kdf algo');
-    if (Number(envelope.kdf.iterations) !== KDF_ITERATIONS) throw new Error('invalid kdf iterations');
+    if (formatVersion <= V2_FORMAT_VERSION && Number(envelope.kdf.iterations) !== KDF_ITERATIONS) {
+      throw new Error('invalid kdf iterations');
+    }
+    if (formatVersion === FORMAT_VERSION && Number(envelope.kdf.iterations) < 100000) {
+      throw new Error('invalid kdf iterations');
+    }
     if (typeof envelope.kdf.salt !== 'string') throw new Error('invalid salt');
     if (base64ToBytes(envelope.kdf.salt).length !== SALT_BYTES) throw new Error('invalid salt length');
     if (!envelope.cipher || typeof envelope.cipher !== 'object') throw new Error('invalid cipher');
@@ -2740,6 +4124,41 @@ class XUSecretVault extends Plugin {
     if (typeof envelope.cipher.iv !== 'string') throw new Error('invalid iv');
     if (base64ToBytes(envelope.cipher.iv).length !== IV_BYTES) throw new Error('invalid iv length');
     if (typeof envelope.payload !== 'string' || !envelope.payload) throw new Error('invalid payload');
+    if (formatVersion === FORMAT_VERSION) {
+      if (typeof envelope.fileId !== 'string') throw new Error('invalid fileId');
+      if (base64ToBytes(envelope.fileId).length !== FILE_ID_BYTES) throw new Error('invalid fileId length');
+      for (const field of ['wrappedDek', 'wrappedMasterKey', 'wrappedDekByMaster']) {
+        const blob = envelope[field];
+        if (!blob || typeof blob !== 'object') throw new Error('invalid ' + field);
+        if (typeof blob.iv !== 'string' || base64ToBytes(blob.iv).length !== IV_BYTES) {
+          throw new Error('invalid ' + field + ' iv');
+        }
+        if (typeof blob.ciphertext !== 'string' || !blob.ciphertext) {
+          throw new Error('invalid ' + field + ' ciphertext');
+        }
+      }
+      if (envelope.recovery != null) {
+        const recovery = envelope.recovery;
+        if (!recovery.kdf || typeof recovery.kdf !== 'object') throw new Error('invalid recovery kdf');
+        if (recovery.kdf.algo !== KDF_ALGO) throw new Error('invalid recovery kdf algo');
+        if (Number(recovery.kdf.iterations) < 100000) throw new Error('invalid recovery iterations');
+        if (typeof recovery.kdf.salt !== 'string') throw new Error('invalid recovery salt');
+        if (!Array.isArray(recovery.questions) || recovery.questions.length !== RECOVERY_QUESTIONS_COUNT) {
+          throw new Error('invalid recovery questions');
+        }
+        if (!recovery.wrappedDek || typeof recovery.wrappedDek.ciphertext !== 'string') {
+          throw new Error('invalid recovery wrappedDek');
+        }
+      }
+      if (envelope.recoveryCode != null) {
+        const code = envelope.recoveryCode;
+        if (!code.kdf || typeof code.kdf !== 'object') throw new Error('invalid recoveryCode kdf');
+        if (Number(code.kdf.iterations) < 10000) throw new Error('invalid recoveryCode iterations');
+        if (!code.wrappedDek || typeof code.wrappedDek.ciphertext !== 'string') {
+          throw new Error('invalid recoveryCode wrappedDek');
+        }
+      }
+    }
     return envelope;
   }
 
@@ -2769,10 +4188,29 @@ class XUSecretVault extends Plugin {
   async decryptEnvelope(envelope, key) {
     const cryptoObj = this.requireCrypto();
     const formatVersion = Number(envelope.formatVersion);
-    const iterations = Number(envelope.kdf.iterations);
-    const saltBase64 = String(envelope.kdf.salt);
     const iv = base64ToBytes(envelope.cipher.iv);
     const payload = base64ToBytes(envelope.payload);
+    let decryptKey = key;
+    if (formatVersion === FORMAT_VERSION) {
+      if (decryptKey instanceof Uint8Array) decryptKey = await importAesGcmKey(cryptoObj, decryptKey);
+      const plaintext = await cryptoObj.subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv,
+          additionalData: buildPayloadAadV3(
+            FORMAT_VERSION,
+            String(envelope.fileId),
+            envelope.cipher.algo
+          ),
+          tagLength: TAG_LENGTH,
+        },
+        decryptKey,
+        payload
+      );
+      return JSON.parse(utf8Decode(plaintext));
+    }
+    const iterations = Number(envelope.kdf.iterations);
+    const saltBase64 = String(envelope.kdf.salt);
     const additionalDataList =
       formatVersion === LEGACY_FORMAT_VERSION
         ? this.legacyAadCandidates(envelope)
@@ -2791,7 +4229,7 @@ class XUSecretVault extends Plugin {
       try {
         const plaintext = await cryptoObj.subtle.decrypt(
           { name: 'AES-GCM', iv, additionalData, tagLength: TAG_LENGTH },
-          key,
+          decryptKey,
           payload
         );
         return JSON.parse(utf8Decode(plaintext));
@@ -2911,10 +4349,20 @@ class XUSecretVault extends Plugin {
     if (opts.generation != null && opts.generation !== this.sessionGeneration) throw this.discardError();
     const notes = opts.notes != null ? opts.notes : this.notes || [];
 
-    const envelope = await this.encryptToEnvelope(entries, key, salt, iterations, notes);
+    const useV3 = opts.v3Ctx || (this.sessionFormatVersion === FORMAT_VERSION && !opts.legacy);
+    let envelope;
+    let verifyKey;
+    if (useV3) {
+      const ctx = opts.v3Ctx || this.currentV3Context();
+      envelope = await this.buildV3Envelope(entries, notes, ctx);
+      verifyKey = ctx.rawDek;
+    } else {
+      envelope = await this.encryptLegacyToEnvelope(entries, key, salt, iterations, notes);
+      verifyKey = key;
+    }
     const text = JSON.stringify(envelope, null, 2);
     if (utf8Encode(text).length > MAX_VAULT_BYTES) throw new Error(this.t('err_vault_too_large'));
-    await this.verifyEnvelopeText(text, key, entries, notes);
+    await this.verifyEnvelopeText(text, verifyKey, entries, notes);
     await this.ensureParentDir(path);
 
     const adapter = this.app.vault.adapter;
@@ -2930,7 +4378,7 @@ class XUSecretVault extends Plugin {
       await adapter.write(tmpPath, text);
       const readBack = await adapter.read(tmpPath);
       if (readBack !== text) throw new Error(this.t('err_write_verify'));
-      await this.verifyEnvelopeText(readBack, key, entries, notes);
+      await this.verifyEnvelopeText(readBack, verifyKey, entries, notes);
 
       // rename 前再判一次 generation / suspended：锁定后的在途任务绝不再落盘
       if (opts.generation != null && (opts.generation !== this.sessionGeneration || this.suspended)) {
@@ -2967,7 +4415,7 @@ class XUSecretVault extends Plugin {
 
       const finalText = await adapter.read(path);
       if (finalText !== text) throw new Error(this.t('err_write_verify'));
-      await this.verifyEnvelopeText(finalText, key, entries, notes);
+      await this.verifyEnvelopeText(finalText, verifyKey, entries, notes);
       if (trackHash !== false) this.knownBlobHash = await this.hashText(finalText);
     } catch (error) {
       try {
@@ -3006,7 +4454,7 @@ class XUSecretVault extends Plugin {
       }
       throw this.normalizeWriteError(error, opts);
     }
-    if (backupWritten) {
+    if (backupWritten && !opts.keepBackup) {
       try {
         await adapter.remove(bakPath);
       } catch (cleanupError) {
@@ -3090,6 +4538,10 @@ class XUSecretVault extends Plugin {
 
   async commitMutation(mutator, kind) {
     if (!this.isUnlocked()) throw new Error(this.t('notice_unlock_first'));
+    if (this.batchActive) throw new Error(this.t('err_batch_busy', {
+        current: this.batch ? this.batch.current : 0,
+        total: this.batch ? this.batch.total : 0,
+      }));
     if (this.suspended) throw new Error(this.t('err_suspended'));
     if (this.conflictPending) throw new Error(this.t('err_conflict_editing_blocked'));
     if (this.isReadOnlyCopy()) throw new Error(this.t('err_conflict_copy_readonly'));
@@ -3208,6 +4660,663 @@ class XUSecretVault extends Plugin {
     }
   }
 
+  /* ---------------- 批量改密 / 恢复码 / 密保问题 ---------------- */
+
+  // 批量操作覆盖目录内全部正式 .enc（含子目录/分组），不含冲突副本
+  batchTargetFiles() {
+    const paths = new Set();
+    for (const file of this.vaultFiles || []) paths.add(this.normalizeVaultPath(file.path));
+    if (this.selectedFilePath) paths.add(this.normalizeVaultPath(this.selectedFilePath));
+    return Array.from(paths).filter(
+      (path) => path.endsWith('.enc') && !CONFLICT_COPY_RE.test(path) && path !== this.conflictPath
+    );
+  }
+
+  // 整批回滚：直接恢复操作前读到的原始密文字节，不做 KDF、不依赖会话密钥
+  async atomicRestoreText(path, text) {
+    const adapter = this.app.vault.adapter;
+    await this.ensureParentDir(path);
+    const tmpPath = path + '.rollback-' + Date.now() + '-' + Math.random().toString(16).slice(2) + '.tmp';
+    const bakPath = path + '.rollback-bak';
+    let moved = false;
+    try {
+      await adapter.write(tmpPath, text);
+      const readBack = await adapter.read(tmpPath);
+      if (readBack !== text) throw new Error(this.t('err_write_verify'));
+      if (await adapter.exists(bakPath)) await adapter.remove(bakPath).catch(() => undefined);
+      if (await adapter.exists(path)) {
+        await adapter.rename(path, bakPath);
+        moved = true;
+      }
+      await adapter.rename(tmpPath, path);
+      const finalText = await adapter.read(path);
+      if (finalText !== text) throw new Error(this.t('err_write_verify'));
+      if (moved) await adapter.remove(bakPath).catch(() => undefined);
+    } catch (error) {
+      try {
+        if (moved && (await adapter.exists(bakPath))) {
+          if (await adapter.exists(path)) await adapter.remove(path);
+          await adapter.rename(bakPath, path);
+        }
+      } catch (restoreError) {
+        console.error('[' + PLUGIN_ID + '] rollback restore failed:', restoreError);
+      }
+      throw error;
+    } finally {
+      if (await adapter.exists(tmpPath)) await adapter.remove(tmpPath).catch(() => undefined);
+    }
+  }
+
+  // 通用批量任务：进度 N/M、锁定/挂起中断、任一失败整批回滚
+  async runBatchFileJob(kind, job, options) {
+    const opts = options || {};
+    if (!opts.allowLocked && !this.isUnlocked()) throw new Error(this.t('notice_unlock_first'));
+    if (this.batchActive) throw new Error(this.t('err_batch_busy', {
+        current: this.batch ? this.batch.current : 0,
+        total: this.batch ? this.batch.total : 0,
+      }));
+    let paths = this.batchTargetFiles();
+    if (!paths.length && opts.allowLocked) {
+      // 锁定时列表已清空：临时扫描一次，仅用于本次批量任务，结束后立即清空
+      try {
+        await this.scanVaultFiles();
+      } catch (error) {
+        paths = [];
+      }
+      paths = this.batchTargetFiles();
+    }
+    if (!paths.length) throw new Error(this.t('err_batch_empty'));
+    this.batchActive = true;
+    this.batchAbortRequested = false;
+    this.batch = { kind, total: paths.length, current: 0, path: '', completed: [] };
+    this.refreshViews();
+    if (opts.onProgress) {
+      try {
+        opts.onProgress(this.batch);
+      } catch (error) {
+        /* ignore progress callback errors */
+      }
+    }
+    const generation = this.sessionGeneration;
+    try {
+      const result = await this.enqueueWrite(async () => {
+        const snapshots = new Map();
+        const completed = [];
+        try {
+          for (const path of paths) {
+            if (
+              this.batchAbortRequested ||
+              generation !== this.sessionGeneration ||
+              this.suspended
+            ) {
+              const error = new Error(this.t('err_batch_interrupted'));
+              error.code = 'xsv-batch-interrupted';
+              throw error;
+            }
+            const original = await this.app.vault.adapter.read(path);
+            snapshots.set(path, original);
+            // 防止批处理期间其它进程改动该文件
+            const latest = await this.app.vault.adapter.read(path);
+            if (latest !== original) {
+              const error = new Error(this.t('err_external_change'));
+              error.code = 'xsv-conflict';
+              throw error;
+            }
+            const outcome = await job(path, original);
+            if (!outcome) {
+              this.batch.current += 1;
+              this.batch.path = path;
+              continue;
+            }
+            await this.writeEnvelope(outcome.entries, null, outcome.salt, outcome.iterations, path, false, {
+              generation,
+              v3Ctx: outcome.ctx,
+              notes: outcome.notes,
+            });
+            completed.push(path);
+            this.batch.completed = completed.slice();
+            this.batch.current += 1;
+            this.batch.path = path;
+            this.refreshViews();
+            if (opts.onProgress) {
+              try {
+                opts.onProgress(this.batch);
+              } catch (progressError) {
+                /* ignore progress callback errors */
+              }
+            }
+          }
+          this.lastBatchResult = { kind, ok: true, completed: completed.slice(), rolledBack: [], rollbackErrors: [] };
+          return { ok: true, completed, snapshots };
+        } catch (error) {
+          const rollbackPaths = completed.slice().reverse();
+          const rollbackErrors = [];
+          for (const path of rollbackPaths) {
+            try {
+              await this.atomicRestoreText(path, snapshots.get(path));
+            } catch (rollbackError) {
+              rollbackErrors.push(path);
+              console.error('[' + PLUGIN_ID + '] batch rollback failed:', path, rollbackError);
+            }
+          }
+          this.lastBatchResult = {
+            kind,
+            ok: false,
+            completed: completed.slice(),
+            rolledBack: rollbackPaths,
+            rollbackErrors,
+            reason: error && error.code ? error.code : 'error',
+            message: error && error.message ? error.message : '',
+          };
+          throw error;
+        }
+      });
+      return result;
+    } finally {
+      this.batchActive = false;
+      this.batchAbortRequested = false;
+      this.batch = null;
+      if (!this.isUnlocked()) {
+        // 锁定态恢复/批量结束后不保留文件名与路径
+        this.vaultFiles = [];
+        this.selectedFilePath = '';
+      }
+      this.refreshViews();
+    }
+  }
+
+  // 校验密码能解开当前第一个文件（只验证，不产生写操作）
+  async verifyVaultPassword(password) {
+    const paths = this.batchTargetFiles();
+    if (!paths.length) return false;
+    try {
+      const text = await this.app.vault.adapter.read(paths[0]);
+      const envelope = this.parseEnvelope(text);
+      if (Number(envelope.formatVersion) === FORMAT_VERSION) {
+        const saltBase64 = String(envelope.kdf.salt);
+        const iterations = Number(envelope.kdf.iterations);
+        const kek = await this.deriveKey(password, base64ToBytes(saltBase64), iterations);
+        await unwrapRawKey(
+          this.requireCrypto(),
+          kek,
+          envelope.wrappedDek,
+          buildWrapAadV3('password', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+        );
+      } else {
+        const key = await this.deriveKey(
+          password,
+          base64ToBytes(envelope.kdf.salt),
+          Number(envelope.kdf.iterations)
+        );
+        await this.decryptEnvelope(envelope, key);
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  // 修改主密码：默认快速改密（换 salt/KEK 重包同一 DEK）；彻底轮换还会生成新 DEK 重加密内容
+  async changeMasterPassword(oldPassword, newPassword, options) {
+    const opts = options || {};
+    const mode = opts.mode === 'full' ? 'full' : 'quick';
+    const oldNormalized = normalizePassword(oldPassword);
+    const newNormalized = normalizePassword(newPassword);
+    if (!oldNormalized) throw new Error(this.t('err_old_password_wrong'));
+    if (newNormalized.length < MIN_MASTER_PASSWORD_LENGTH) {
+      throw new Error(this.t('err_new_password_short'));
+    }
+    const paths = this.batchTargetFiles();
+    if (!paths.length) throw new Error(this.t('err_batch_empty'));
+    if (!(await this.verifyVaultPassword(oldNormalized))) {
+      throw new Error(this.t('err_old_password_wrong'));
+    }
+    const sessions = new Map();
+    const result = await this.runBatchFileJob('change-password', async (path, text) => {
+      const cryptoObj = this.requireCrypto();
+      const envelope = this.parseEnvelope(text);
+      const formatVersion = Number(envelope.formatVersion);
+      let rawDek;
+      let rawMasterKey;
+      let fileId;
+      let recovery = null;
+      let recoveryCode = null;
+      let data;
+      if (formatVersion === FORMAT_VERSION) {
+        const saltBase64 = String(envelope.kdf.salt);
+        const iterations = Number(envelope.kdf.iterations);
+        const oldKek = await this.deriveKey(oldNormalized, base64ToBytes(saltBase64), iterations);
+        try {
+          rawDek = await unwrapRawKey(
+            cryptoObj,
+            oldKek,
+            envelope.wrappedDek,
+            buildWrapAadV3('password', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+          );
+          rawMasterKey = await unwrapRawKey(
+            cryptoObj,
+            oldKek,
+            envelope.wrappedMasterKey,
+            buildWrapAadV3('master', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+          );
+        } catch (error) {
+          throw new Error(this.t('err_old_password_wrong'));
+        }
+        data = await this.decryptEnvelope(envelope, rawDek);
+        fileId = base64ToBytes(envelope.fileId);
+        recovery = envelope.recovery || null;
+        recoveryCode = envelope.recoveryCode || null;
+      } else {
+        const oldKey = await this.deriveKey(
+          oldNormalized,
+          base64ToBytes(envelope.kdf.salt),
+          Number(envelope.kdf.iterations)
+        );
+        data = await this.decryptEnvelope(envelope, oldKey);
+        rawDek = randomBytes(cryptoObj, DEK_BYTES);
+        rawMasterKey = this.rawMasterKey || randomBytes(cryptoObj, MASTER_KEY_BYTES);
+        fileId = randomBytes(cryptoObj, FILE_ID_BYTES);
+        recovery = this.sessionRecovery;
+        recoveryCode = this.sessionRecoveryCode;
+      }
+      const payload = decodePayload(data);
+      if (!payload) throw new Error(this.t('err_vault_corrupt'));
+      const newSalt = randomBytes(cryptoObj, SALT_BYTES);
+      const newKek = await this.deriveKey(newNormalized, newSalt, KDF_ITERATIONS);
+      const nextDek = mode === 'full' ? randomBytes(cryptoObj, DEK_BYTES) : rawDek;
+      const ctx = {
+        rawDek: nextDek,
+        kek: newKek,
+        salt: newSalt,
+        iterations: KDF_ITERATIONS,
+        fileId,
+        rawMasterKey,
+        recovery,
+        recoveryCode,
+      };
+      if (formatVersion === FORMAT_VERSION && mode !== 'full') {
+        // 快速档：payload 与 fileId 均不变，只重包包裹层（不重加密内容）
+        ctx.payloadReuse = { iv: String(envelope.cipher.iv), payload: String(envelope.payload) };
+      }
+      sessions.set(path, {
+        data: payload,
+        rawDek: nextDek,
+        kek: newKek,
+        rawMasterKey,
+        salt: newSalt,
+        saltBase64: bytesToBase64(newSalt),
+        iterations: KDF_ITERATIONS,
+        fileId,
+        fileIdBase64: bytesToBase64(fileId),
+        recovery,
+        recoveryCode,
+      });
+      return {
+        entries: payload.entries,
+        notes: payload.notes,
+        salt: newSalt,
+        iterations: KDF_ITERATIONS,
+        ctx,
+      };
+    }, { onProgress: opts.onProgress });
+
+    this.sessionPassword = newNormalized;
+    const currentPath = this.selectedFilePath ? this.normalizeVaultPath(this.selectedFilePath) : '';
+    const current = sessions.get(currentPath);
+    if (current) {
+      await this.applyV3Session(
+        Object.assign({}, current, {
+          password: newNormalized,
+          hash: await this.hashText(await this.readVaultText(currentPath)),
+        })
+      );
+      this.reverifyChallenge = await this.buildReverifyChallenge(
+        this.sessionKek,
+        this.sessionSalt,
+        this.sessionIterations
+      );
+      this.fileSessions.set(currentPath, {
+        key: this.sessionKey,
+        kek: this.sessionKek,
+        rawDek: this.rawDek,
+        rawMasterKey: this.rawMasterKey,
+        fileId: this.sessionFileId,
+        fileIdBase64: this.sessionFileIdBase64,
+        formatVersion: FORMAT_VERSION,
+        legacyKey: null,
+        recovery: this.sessionRecovery,
+        recoveryCode: this.sessionRecoveryCode,
+        salt: this.sessionSalt,
+        saltBase64: bytesToBase64(this.sessionSalt),
+        iterations: this.sessionIterations,
+        hash: this.knownBlobHash,
+        conflictPending: false,
+        conflictPath: '',
+      });
+    }
+    for (const [path, session] of sessions.entries()) {
+      if (path === currentPath) continue;
+      const cached = this.fileSessions.get(path);
+      if (!cached) continue;
+      const dekKey = await importAesGcmKey(this.requireCrypto(), session.rawDek);
+      this.fileSessions.set(path, Object.assign({}, cached, {
+        key: dekKey,
+        kek: session.kek,
+        rawDek: session.rawDek,
+        rawMasterKey: session.rawMasterKey,
+        fileId: session.fileId,
+        fileIdBase64: session.fileIdBase64,
+        formatVersion: FORMAT_VERSION,
+        legacyKey: null,
+        recovery: session.recovery,
+        recoveryCode: session.recoveryCode,
+        salt: session.salt,
+        saltBase64: session.saltBase64,
+        iterations: session.iterations,
+      }));
+    }
+    return { ok: true, mode, total: result.completed.length };
+  }
+
+  // 设置/修改密保问题：要求当前主密码；重包每个文件的主密钥并整批原子化
+  async setRecoveryQuestions(currentPassword, questions, answers) {
+    const password = normalizePassword(currentPassword);
+    if (!password) throw new Error(this.t('err_current_password_wrong'));
+    if (!(await this.verifyVaultPassword(password))) {
+      throw new Error(this.t('err_current_password_wrong'));
+    }
+    if (!Array.isArray(questions) || questions.length !== RECOVERY_QUESTIONS_COUNT) {
+      throw new Error(this.t('err_recovery_questions_count'));
+    }
+    const normalizedQuestions = questions.map(normalizeQuestionText);
+    if (normalizedQuestions.some((question) => !question)) {
+      throw new Error(this.t('err_recovery_questions_empty'));
+    }
+    if (!Array.isArray(answers) || answers.length !== RECOVERY_QUESTIONS_COUNT) {
+      throw new Error(this.t('err_recovery_answers_required'));
+    }
+    if (answers.some((answer) => normalizeSecurityAnswer(answer).length < SECURITY_ANSWER_MIN)) {
+      throw new Error(this.t('err_recovery_answer_short'));
+    }
+    let newRecovery = null;
+    await this.runBatchFileJob('recovery-questions', async (path, text) => {
+      const cryptoObj = this.requireCrypto();
+      const envelope = this.parseEnvelope(text);
+      if (Number(envelope.formatVersion) !== FORMAT_VERSION) {
+        throw new Error(this.t('err_legacy_needs_upgrade'));
+      }
+      const saltBase64 = String(envelope.kdf.salt);
+      const iterations = Number(envelope.kdf.iterations);
+      const kek = await this.deriveKey(password, base64ToBytes(saltBase64), iterations);
+      const rawMasterKey = await unwrapRawKey(
+        cryptoObj,
+        kek,
+        envelope.wrappedMasterKey,
+        buildWrapAadV3('master', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+      );
+      const rawDek = await unwrapRawKey(
+        cryptoObj,
+        kek,
+        envelope.wrappedDek,
+        buildWrapAadV3('password', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+      );
+      const payload = decodePayload(await this.decryptEnvelope(envelope, rawDek));
+      if (!payload) throw new Error(this.t('err_vault_corrupt'));
+      const recovery = await this.buildRecoveryBlock(rawMasterKey, normalizedQuestions, answers);
+      newRecovery = recovery;
+      const ctx = {
+        rawDek,
+        kek,
+        salt: base64ToBytes(saltBase64),
+        iterations,
+        fileId: base64ToBytes(envelope.fileId),
+        rawMasterKey,
+        recovery,
+        recoveryCode: envelope.recoveryCode || null,
+      };
+      return {
+        entries: payload.entries,
+        notes: payload.notes,
+        salt: ctx.salt,
+        iterations,
+        ctx,
+      };
+    });
+    if (newRecovery) {
+      this.sessionRecovery = newRecovery;
+      const currentPath = this.selectedFilePath ? this.normalizeVaultPath(this.selectedFilePath) : '';
+      const cached = this.fileSessions.get(currentPath);
+      if (cached) this.fileSessions.set(currentPath, Object.assign({}, cached, { recovery: newRecovery }));
+    }
+    return { ok: true };
+  }
+
+  async findRecoverySource(kind) {
+    const preferred = this.selectedFilePath ? [this.normalizeVaultPath(this.selectedFilePath)] : [];
+    let paths = Array.from(new Set(preferred.concat(this.batchTargetFiles())));
+    if (!paths.length) {
+      // 锁定时列表已清空：临时扫描目录找恢复源，但不把文件名留在内存
+      const previousFiles = this.vaultFiles;
+      const previousSelected = this.settings.selectedFile;
+      try {
+        const scanned = await this.scanVaultFiles();
+        paths = scanned.map((file) => file.path);
+      } catch (error) {
+        paths = [];
+      } finally {
+        if (!this.isUnlocked()) {
+          this.vaultFiles = previousFiles;
+          this.settings.selectedFile = previousSelected;
+        }
+      }
+    }
+    for (const path of paths) {
+      if (!(await this.app.vault.adapter.exists(path))) continue;
+      try {
+        const text = await this.app.vault.adapter.read(path);
+        const envelope = this.parseEnvelope(text);
+        if (Number(envelope.formatVersion) !== FORMAT_VERSION) continue;
+        if (kind === 'questions' && envelope.recovery) {
+          return { path, text, envelope };
+        }
+        if (kind === 'code' && envelope.recoveryCode) {
+          return { path, text, envelope };
+        }
+      } catch (error) {
+        /* 跳过损坏/不匹配的文件，继续找可用恢复源 */
+      }
+    }
+    return null;
+  }
+
+  async verifyRecoveredMasterKey(source, rawMasterKey) {
+    const cryptoObj = this.requireCrypto();
+    const rawDek = await unwrapRawKey(
+      cryptoObj,
+      await importAesGcmKey(cryptoObj, rawMasterKey),
+      source.envelope.wrappedDekByMaster,
+      buildMasterDekAad(String(source.envelope.fileId), CIPHER_ALGO)
+    );
+    await this.decryptEnvelope(source.envelope, rawDek);
+    return rawDek;
+  }
+
+  // 三道密保问题恢复：答案归一化 → PBKDF2-SHA512 1,000,000 + 独立 salt → 解出主密钥
+  async recoverWithQuestions(answers) {
+    const source = await this.findRecoverySource('questions');
+    if (!source) return { ok: false, code: 'unavailable' };
+    try {
+      if (!Array.isArray(answers) || answers.length !== RECOVERY_QUESTIONS_COUNT) throw new Error('answers');
+      const cryptoObj = this.requireCrypto();
+      const recovery = source.envelope.recovery;
+      const saltBase64 = String(recovery.kdf.salt);
+      const iterations = Number(recovery.kdf.iterations);
+      const key = await this.deriveKeyFromText(
+        joinSecurityAnswers(answers),
+        base64ToBytes(saltBase64),
+        iterations
+      );
+      const qHash = await this.questionTextHash(recovery.questions);
+      const rawMasterKey = await unwrapRawKey(
+        cryptoObj,
+        key,
+        recovery.wrappedDek,
+        buildWrapAadV3('recovery', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO, qHash)
+      );
+      await this.verifyRecoveredMasterKey(source, rawMasterKey);
+      this.pendingRecovery = { rawMasterKey, sourcePath: source.path, kind: 'questions' };
+      return { ok: true, questions: recovery.questions.slice(), sourcePath: source.path };
+    } catch (error) {
+      this.registerUnlockFailure();
+      return { ok: false, code: 'failed' };
+    }
+  }
+
+  // 恢复码恢复：高熵随机码 → 独立 salt → 解出主密钥
+  async recoverWithCode(code) {
+    const source = await this.findRecoverySource('code');
+    if (!source) return { ok: false, code: 'unavailable' };
+    try {
+      const normalized = normalizeRecoveryCode(code);
+      if (!normalized) throw new Error('code');
+      const cryptoObj = this.requireCrypto();
+      const block = source.envelope.recoveryCode;
+      const saltBase64 = String(block.kdf.salt);
+      const iterations = Number(block.kdf.iterations);
+      const key = await this.deriveKeyFromText(normalized, base64ToBytes(saltBase64), iterations);
+      const rawMasterKey = await unwrapRawKey(
+        cryptoObj,
+        key,
+        block.wrappedDek,
+        buildWrapAadV3('recovery-code', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+      );
+      await this.verifyRecoveredMasterKey(source, rawMasterKey);
+      this.pendingRecovery = { rawMasterKey, sourcePath: source.path, kind: 'code' };
+      return { ok: true, sourcePath: source.path };
+    } catch (error) {
+      this.registerUnlockFailure();
+      return { ok: false, code: 'failed' };
+    }
+  }
+
+  // 恢复成功后强制设置新主密码，并把全部文件重包；失败整批回滚
+  async completeRecoveryPassword(newPassword) {
+    const pending = this.pendingRecovery;
+    if (!pending || !pending.rawMasterKey) throw new Error(this.t('err_recovery_unavailable'));
+    const newNormalized = normalizePassword(newPassword);
+    if (newNormalized.length < MIN_MASTER_PASSWORD_LENGTH) {
+      throw new Error(this.t('err_new_password_short'));
+    }
+    const sessions = new Map();
+    const result = await this.runBatchFileJob(
+      'recovery-complete',
+      async (path, text) => {
+        const cryptoObj = this.requireCrypto();
+        const envelope = this.parseEnvelope(text);
+        if (Number(envelope.formatVersion) !== FORMAT_VERSION || !envelope.wrappedDekByMaster) {
+          throw new Error(this.t('err_legacy_needs_upgrade'));
+        }
+        const masterKey = await importAesGcmKey(cryptoObj, pending.rawMasterKey);
+        const rawDek = await unwrapRawKey(
+          cryptoObj,
+          masterKey,
+          envelope.wrappedDekByMaster,
+          buildMasterDekAad(String(envelope.fileId), CIPHER_ALGO)
+        );
+        const payload = decodePayload(await this.decryptEnvelope(envelope, rawDek));
+        if (!payload) throw new Error(this.t('err_vault_corrupt'));
+        const newSalt = randomBytes(cryptoObj, SALT_BYTES);
+        const newKek = await this.deriveKey(newNormalized, newSalt, KDF_ITERATIONS);
+        const ctx = {
+          rawDek,
+          kek: newKek,
+          salt: newSalt,
+          iterations: KDF_ITERATIONS,
+          fileId: base64ToBytes(envelope.fileId),
+          rawMasterKey: pending.rawMasterKey,
+          recovery: envelope.recovery || null,
+          recoveryCode: envelope.recoveryCode || null,
+        };
+        sessions.set(path, {
+          data: payload,
+          rawDek,
+          kek: newKek,
+          rawMasterKey: pending.rawMasterKey,
+          salt: newSalt,
+          saltBase64: bytesToBase64(newSalt),
+          iterations: KDF_ITERATIONS,
+          fileId: base64ToBytes(envelope.fileId),
+          fileIdBase64: String(envelope.fileId),
+          recovery: envelope.recovery || null,
+          recoveryCode: envelope.recoveryCode || null,
+        });
+        return {
+          entries: payload.entries,
+          notes: payload.notes,
+          salt: newSalt,
+          iterations: KDF_ITERATIONS,
+          ctx,
+        };
+      },
+      { allowLocked: true }
+    );
+    const source = sessions.get(pending.sourcePath) || sessions.values().next().value;
+    if (!source) throw new Error(this.t('err_recovery_unavailable'));
+    await this.applyV3Session(
+      Object.assign({}, source, {
+        password: newNormalized,
+        hash: await this.hashText(await this.readVaultText(pending.sourcePath)),
+      })
+    );
+    this.selectedFilePath = pending.sourcePath;
+    this.selectedVaultPath = '';
+    this.sessionGeneration += 1;
+    this.reverifyChallenge = await this.buildReverifyChallenge(
+      this.sessionKek,
+      this.sessionSalt,
+      this.sessionIterations
+    );
+    this.fileSessions.clear();
+    this.rememberCurrentFileSession();
+    this.pendingRecovery = null;
+    this.failureCount = 0;
+    this.blockedUntil = 0;
+    this.suspended = false;
+    this.suspendReason = '';
+    this.stopCountdown();
+    this.vaultState = 'present';
+    this.conflictPending = false;
+    this.conflictPath = '';
+    this.settings.initializedPath = this.normalizeVaultPath(pending.sourcePath);
+    this.settings.selectedFile = this.normalizeVaultPath(pending.sourcePath);
+    this.resetIdleTimer();
+    await this.scanVaultFiles();
+    this.refreshViews();
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      console.error('[' + PLUGIN_ID + '] save settings failed:', error);
+    }
+    new Notice(this.t('notice_recovery_reset'), 12000);
+    return { ok: true, total: result.completed.length };
+  }
+
+  // 供 UI/测试调用的纯本地强度估算
+  evaluatePasswordStrength(password) {
+    const estimate = estimatePasswordStrength(password);
+    return Object.assign({}, estimate, {
+      tierLabel: this.t(
+        estimate.tier === 'danger'
+          ? 'strength_danger'
+          : estimate.tier === 'general'
+            ? 'strength_general'
+            : 'strength_safe'
+      ),
+      singleText: formatDuration(estimate.secondsSingle, this.language),
+      clusterText: formatDuration(estimate.secondsCluster, this.language),
+    });
+  }
+
   /* ---------------- 多文件与分组 ---------------- */
 
   // 所有切换 / 新建 / 删除 / 重命名都进同一条串行链，避免与保存并发
@@ -3241,20 +5350,15 @@ class XUSecretVault extends Plugin {
     const target = this.normalizeVaultPath(path);
     const text = await this.readVaultText(target);
     const envelope = this.parseEnvelope(text);
+    const formatVersion = Number(envelope.formatVersion);
     const iterations = Number(envelope.kdf.iterations);
     const saltBase64 = String(envelope.kdf.salt);
     const salt = base64ToBytes(saltBase64);
     const cached = this.fileSessions.get(target);
-    let key = null;
-    if (cached && cached.saltBase64 === saltBase64 && cached.iterations === iterations) {
-      key = cached.key;
-    } else {
-      if (!this.sessionPassword) {
-        const error = new Error(this.t('err_session_password_lost'));
-        error.code = 'xsv-need-password';
-        throw error;
-      }
-      key = await this.deriveKey(this.sessionPassword, salt, iterations);
+    if (!this.sessionPassword) {
+      const error = new Error(this.t('err_session_password_lost'));
+      error.code = 'xsv-need-password';
+      throw error;
     }
     // 解锁期间可能已经锁定：锁定后绝不把旧会话读出的内容写进内存
     if (generation !== undefined && generation !== this.sessionGeneration) {
@@ -3262,55 +5366,158 @@ class XUSecretVault extends Plugin {
       discarded.code = 'xsv-discarded';
       throw discarded;
     }
-    let data = null;
-    try {
-      data = await this.decryptEnvelope(envelope, key);
-    } catch (error) {
-      // 缓存的密钥可能因外部改密码而失效：只在有主密码时重派生一次，仍失败才报错
-      if (cached && this.sessionPassword) {
+    let session = null;
+    let legacy = null;
+    if (formatVersion === FORMAT_VERSION) {
+      try {
+        if (
+          cached &&
+          cached.formatVersion === FORMAT_VERSION &&
+          cached.saltBase64 === saltBase64 &&
+          cached.iterations === iterations &&
+          cached.rawDek
+        ) {
+          const dekKey = await importAesGcmKey(this.requireCrypto(), cached.rawDek);
+          const data = await this.decryptEnvelope(envelope, dekKey);
+          const payload = decodePayload(data);
+          if (!payload) throw new Error(this.t('err_vault_corrupt'));
+          session = {
+            data: payload,
+            rawDek: cached.rawDek,
+            kek: cached.kek,
+            rawMasterKey: cached.rawMasterKey,
+            salt,
+            saltBase64,
+            iterations,
+            fileId: base64ToBytes(envelope.fileId),
+            fileIdBase64: String(envelope.fileId),
+            recovery: envelope.recovery || null,
+            recoveryCode: envelope.recoveryCode || null,
+            hash: await this.hashText(text),
+          };
+        } else {
+          session = await this.openV3SessionFromEnvelope(envelope, this.sessionPassword, {
+            hash: await this.hashText(text),
+          });
+        }
+      } catch (error) {
+        // 缓存可能因外部改密码失效：重派生一次，仍失败则拒绝打开该文件
         try {
-          key = await this.deriveKey(this.sessionPassword, salt, iterations);
-          data = await this.decryptEnvelope(envelope, key);
+          if (cached) this.fileSessions.delete(target);
+          session = await this.openV3SessionFromEnvelope(envelope, this.sessionPassword, {
+            hash: await this.hashText(text),
+          });
         } catch (retryError) {
-          data = null;
-        } finally {
-          this.fileSessions.delete(target);
+          const wrong = new Error(this.t('err_file_wrong_password'));
+          wrong.code = 'xsv-wrong-file-password';
+          throw wrong;
         }
       }
-      if (!data) {
-        // 密钥不匹配/文件损坏：明确提示，且绝不改动当前文件
+    } else {
+      let key;
+      let data;
+      try {
+        key = await this.deriveKey(this.sessionPassword, salt, iterations);
+        data = await this.decryptEnvelope(envelope, key);
+      } catch (error) {
         const wrong = new Error(this.t('err_file_wrong_password'));
         wrong.code = 'xsv-wrong-file-password';
         throw wrong;
       }
+      legacy = {
+        data: decodePayload(data),
+        key,
+        salt,
+        saltBase64,
+        iterations,
+        formatVersion,
+        hash: await this.hashText(text),
+      };
+      if (!legacy.data) throw new Error(this.t('err_vault_corrupt'));
+      try {
+        session = await this.migrateLegacyEnvelopeToV3(
+          target,
+          envelope,
+          legacy.data,
+          this.sessionPassword,
+          generation
+        );
+        session.hash = await this.hashText(await this.readVaultText(target));
+      } catch (error) {
+        if (error && error.discarded) throw error;
+        console.error('[' + PLUGIN_ID + '] switch-file upgrade failed:', error);
+      }
     }
-    const payload = decodePayload(data);
-    if (!payload) throw new Error(this.t('err_vault_corrupt'));
+    if (generation !== undefined && generation !== this.sessionGeneration) {
+      const discarded = new Error('discarded');
+      discarded.code = 'xsv-discarded';
+      throw discarded;
+    }
     this.rememberCurrentFileSession();
-    let notes = payload.notes.map((item, index) => normalizeStoredNote(item, 'note-' + index));
+    if (session) {
+      await this.applyV3Session(
+        Object.assign({}, session, { password: this.sessionPassword })
+      );
+      this.reverifyChallenge = await this.buildReverifyChallenge(
+        this.sessionKek,
+        this.sessionSalt,
+        this.sessionIterations
+      );
+      this.fileSessions.set(target, {
+        key: this.sessionKey,
+        kek: this.sessionKek,
+        rawDek: this.rawDek,
+        rawMasterKey: this.rawMasterKey,
+        fileId: this.sessionFileId,
+        fileIdBase64: this.sessionFileIdBase64,
+        formatVersion: FORMAT_VERSION,
+        legacyKey: null,
+        recovery: this.sessionRecovery,
+        recoveryCode: this.sessionRecoveryCode,
+        salt: this.sessionSalt,
+        saltBase64: bytesToBase64(this.sessionSalt),
+        iterations: this.sessionIterations,
+        hash: this.knownBlobHash,
+        conflictPending: !!(cached && cached.conflictPending),
+        conflictPath: cached && cached.conflictPath ? cached.conflictPath : '',
+      });
+    } else {
+      this.applyLegacySession(Object.assign({}, legacy, { password: this.sessionPassword }));
+      this.reverifyChallenge = await this.buildReverifyChallenge(
+        legacy.key,
+        legacy.salt,
+        legacy.iterations,
+        buildAad(AAD_PREFIX, legacy.formatVersion, KDF_ALGO, legacy.iterations, legacy.saltBase64, CIPHER_ALGO)
+      );
+      this.fileSessions.set(target, {
+        key: legacy.key,
+        kek: null,
+        rawDek: null,
+        rawMasterKey: null,
+        fileId: null,
+        fileIdBase64: '',
+        formatVersion: legacy.formatVersion,
+        legacyKey: legacy.key,
+        recovery: null,
+        recoveryCode: null,
+        salt: legacy.salt,
+        saltBase64: legacy.saltBase64,
+        iterations: legacy.iterations,
+        hash: legacy.hash,
+        conflictPending: !!(cached && cached.conflictPending),
+        conflictPath: cached && cached.conflictPath ? cached.conflictPath : '',
+      });
+    }
+    let notes = this.notes.map((item, index) => normalizeStoredNote(item, 'note-' + index));
     if (!notes.length) notes = [createDefaultNote()];
-    const hash = await this.hashText(text);
+    this.notes = notes;
+    this.entries = this.entries.map((item, index) => normalizeStoredEntry(item, 'restored-' + index));
     this.selectedFilePath = target;
     this.selectedVaultPath = '';
-    this.sessionKey = key;
-    this.sessionSalt = salt;
-    this.sessionIterations = iterations;
-    this.entries = payload.entries.map((item, index) => normalizeStoredEntry(item, 'restored-' + index));
-    this.notes = notes;
-    this.contentVersion = payload.contentVersion;
-    this.knownBlobHash = hash;
+    this.knownBlobHash = session ? this.knownBlobHash : legacy.hash;
     this.conflictPending = !!(cached && cached.conflictPending);
     this.conflictPath = cached && cached.conflictPath ? cached.conflictPath : '';
     this.settings.selectedFile = target;
-    this.fileSessions.set(target, {
-      key,
-      salt,
-      saltBase64,
-      iterations,
-      hash,
-      conflictPending: this.conflictPending,
-      conflictPath: this.conflictPath,
-    });
     this.vaultState = 'present';
     this.resetViewNotes();
     this.resetIdleTimer();
@@ -3319,6 +5526,13 @@ class XUSecretVault extends Plugin {
 
   async switchVaultFile(path) {
     if (!this.isUnlocked()) return false;
+    if (this.batchActive) {
+      new Notice(this.t('err_batch_busy', {
+        current: this.batch ? this.batch.current : 0,
+        total: this.batch ? this.batch.total : 0,
+      }), 4000);
+      return false;
+    }
     const target = this.normalizeVaultPath(path);
     if (this.selectedFilePath && target === this.normalizeVaultPath(this.selectedFilePath)) return true;
     this.fileLoading = target;
@@ -3355,6 +5569,13 @@ class XUSecretVault extends Plugin {
       new Notice(this.t('notice_unlock_first'), 3000);
       return { ok: false, reason: 'locked' };
     }
+    if (this.batchActive) {
+      new Notice(this.t('err_batch_busy', {
+        current: this.batch ? this.batch.current : 0,
+        total: this.batch ? this.batch.total : 0,
+      }), 4000);
+      return { ok: false, reason: 'busy' };
+    }
     const parsed = parseVaultFileInput(rawName, rawGroup);
     if (!parsed) {
       new Notice(this.t('err_file_name_invalid'), 4000);
@@ -3381,31 +5602,64 @@ class XUSecretVault extends Plugin {
       if (await this.app.vault.adapter.exists(target)) return { ok: false, reason: 'exists' };
       const cryptoObj = this.requireCrypto();
       const salt = randomBytes(cryptoObj, SALT_BYTES);
-      const key = await this.deriveKey(password, salt, KDF_ITERATIONS);
+      const kek = await this.deriveKey(password, salt, KDF_ITERATIONS);
+      const rawDek = randomBytes(cryptoObj, DEK_BYTES);
+      const rawMasterKey = this.rawMasterKey || randomBytes(cryptoObj, MASTER_KEY_BYTES);
+      const fileId = randomBytes(cryptoObj, FILE_ID_BYTES);
       if (generation !== this.sessionGeneration || !this.sessionKey || this.suspended) {
         return { ok: false, reason: 'discarded' };
       }
       const notes = [createDefaultNote()];
-      await this.writeEnvelope([], key, salt, KDF_ITERATIONS, target, true, {
+      const ctx = {
+        rawDek,
+        kek,
+        salt,
+        iterations: KDF_ITERATIONS,
+        fileId,
+        rawMasterKey,
+        recovery: this.sessionRecovery,
+        recoveryCode: this.sessionRecoveryCode,
+      };
+      await this.writeEnvelope([], null, salt, KDF_ITERATIONS, target, true, {
         generation,
         mustNotExist: true,
         notes,
+        v3Ctx: ctx,
       });
+      const writtenText = await this.readVaultText(target);
       // 新文件成为当前文件：旧文件状态先存回其独立记录
       this.rememberCurrentFileSession();
+      await this.applyV3Session({
+        data: { entries: [], notes, contentVersion: CONTENT_VERSION },
+        rawDek,
+        kek,
+        rawMasterKey,
+        salt,
+        saltBase64: bytesToBase64(salt),
+        iterations: KDF_ITERATIONS,
+        fileId,
+        fileIdBase64: bytesToBase64(fileId),
+        recovery: this.sessionRecovery,
+        recoveryCode: this.sessionRecoveryCode,
+        hash: await this.hashText(writtenText),
+        password,
+      });
       this.selectedFilePath = target;
       this.selectedVaultPath = '';
-      this.sessionKey = key;
-      this.sessionSalt = salt;
-      this.sessionIterations = KDF_ITERATIONS;
-      this.entries = [];
-      this.notes = notes;
-      this.contentVersion = CONTENT_VERSION;
-      this.knownBlobHash = await this.hashText(await this.readVaultText(target));
+      this.reverifyChallenge = await this.buildReverifyChallenge(kek, salt, KDF_ITERATIONS);
       this.conflictPending = false;
       this.conflictPath = '';
       this.fileSessions.set(target, {
-        key,
+        key: this.sessionKey,
+        kek,
+        rawDek,
+        rawMasterKey,
+        fileId,
+        fileIdBase64: bytesToBase64(fileId),
+        formatVersion: FORMAT_VERSION,
+        legacyKey: null,
+        recovery: this.sessionRecovery,
+        recoveryCode: this.sessionRecoveryCode,
         salt,
         saltBase64: bytesToBase64(salt),
         iterations: KDF_ITERATIONS,
@@ -3436,6 +5690,13 @@ class XUSecretVault extends Plugin {
   // 重命名 / 移动：同目录内改名或换分组，同名目标一律拒绝
   async renameVaultFile(path, rawName, rawGroup) {
     if (!this.isUnlocked()) return { ok: false, reason: 'locked' };
+    if (this.batchActive) {
+      new Notice(this.t('err_batch_busy', {
+        current: this.batch ? this.batch.current : 0,
+        total: this.batch ? this.batch.total : 0,
+      }), 4000);
+      return { ok: false, reason: 'busy' };
+    }
     const parsed = parseVaultFileInput(rawName, rawGroup);
     if (!parsed) {
       new Notice(this.t('err_file_name_invalid'), 4000);
@@ -3480,6 +5741,13 @@ class XUSecretVault extends Plugin {
 
   async deleteVaultFile(path) {
     if (!this.isUnlocked()) return { ok: false, reason: 'locked' };
+    if (this.batchActive) {
+      new Notice(this.t('err_batch_busy', {
+        current: this.batch ? this.batch.current : 0,
+        total: this.batch ? this.batch.total : 0,
+      }), 4000);
+      return { ok: false, reason: 'busy' };
+    }
     const target = this.normalizeVaultPath(path);
     const generation = this.sessionGeneration;
     const isCurrent = this.selectedFilePath && this.normalizeVaultPath(this.selectedFilePath) === target;
@@ -3554,11 +5822,29 @@ class XUSecretVault extends Plugin {
 
   /* ---------------- 保险库生命周期 ---------------- */
 
-  async createVault(password) {
+  async createVault(password, options) {
+    const opts = options || {};
     const cryptoObj = this.requireCrypto();
     const normalized = normalizePassword(password);
+    const questions = Array.isArray(opts.questions) ? opts.questions.map(normalizeQuestionText) : [];
+    const answers = Array.isArray(opts.answers) ? opts.answers : [];
+    if (questions.length) {
+      if (questions.length !== RECOVERY_QUESTIONS_COUNT) throw new Error(this.t('err_recovery_questions_count'));
+      if (questions.some((question) => !question)) throw new Error(this.t('err_recovery_questions_empty'));
+      if (answers.length !== RECOVERY_QUESTIONS_COUNT || answers.some((answer) => normalizeSecurityAnswer(answer).length < SECURITY_ANSWER_MIN)) {
+        throw new Error(this.t('err_recovery_answer_short'));
+      }
+    }
     const salt = randomBytes(cryptoObj, SALT_BYTES);
-    const key = await this.deriveKey(normalized, salt, KDF_ITERATIONS);
+    const kek = await this.deriveKey(normalized, salt, KDF_ITERATIONS);
+    const rawDek = randomBytes(cryptoObj, DEK_BYTES);
+    const rawMasterKey = randomBytes(cryptoObj, MASTER_KEY_BYTES);
+    const fileId = randomBytes(cryptoObj, FILE_ID_BYTES);
+    const recoveryCode = base32Encode(randomBytes(cryptoObj, 16));
+    const recovery = questions.length
+      ? await this.buildRecoveryBlock(rawMasterKey, questions, answers)
+      : null;
+    const recoveryCodeBlock = await this.buildRecoveryCodeBlock(rawMasterKey, recoveryCode);
     // 首次创建落在新目录下的默认文件；旧版 <vault>/xu-secrets.enc 已存在时不会走到这里
     const configured = this.normalizeVaultPath(this.settings.vaultPath);
     const path =
@@ -3569,26 +5855,53 @@ class XUSecretVault extends Plugin {
     // 已存在同名文件时拒绝创建，避免覆盖旧库；writeEnvelope 在 rename 前还会再查一次，堵住 exists→rename 竞态
     if (await this.app.vault.adapter.exists(path)) throw new Error(this.t('err_vault_exists'));
     const initialNotes = [createDefaultNote()];
-    await this.writeEnvelope([], key, salt, KDF_ITERATIONS, path, true, {
+    const ctx = {
+      rawDek,
+      kek,
+      salt,
+      iterations: KDF_ITERATIONS,
+      fileId,
+      rawMasterKey,
+      recovery,
+      recoveryCode: recoveryCodeBlock,
+    };
+    await this.writeEnvelope([], null, salt, KDF_ITERATIONS, path, true, {
       generation: this.sessionGeneration,
       mustNotExist: true,
       notes: initialNotes,
+      v3Ctx: ctx,
     });
     this.sessionGeneration += 1;
-    this.sessionPassword = normalized;
+    await this.applyV3Session({
+      data: { entries: [], notes: initialNotes, contentVersion: CONTENT_VERSION },
+      rawDek,
+      kek,
+      rawMasterKey,
+      salt,
+      saltBase64: bytesToBase64(salt),
+      iterations: KDF_ITERATIONS,
+      fileId,
+      fileIdBase64: bytesToBase64(fileId),
+      recovery,
+      recoveryCode: recoveryCodeBlock,
+      hash: await this.hashText(await this.readVaultText(path)),
+      password: normalized,
+    });
     this.selectedFilePath = path;
-    this.sessionKey = key;
-    this.sessionSalt = salt;
-    this.sessionIterations = KDF_ITERATIONS;
-    this.entries = [];
-    this.notes = initialNotes;
-    this.contentVersion = CONTENT_VERSION;
     this.vaultState = 'present';
     this.conflictPending = false;
     this.conflictPath = '';
-    this.knownBlobHash = await this.hashText(await this.readVaultText(path));
     this.fileSessions.set(path, {
-      key,
+      key: this.sessionKey,
+      kek,
+      rawDek,
+      rawMasterKey,
+      fileId,
+      fileIdBase64: bytesToBase64(fileId),
+      formatVersion: FORMAT_VERSION,
+      legacyKey: null,
+      recovery,
+      recoveryCode: recoveryCodeBlock,
       salt,
       saltBase64: bytesToBase64(salt),
       iterations: KDF_ITERATIONS,
@@ -3596,7 +5909,7 @@ class XUSecretVault extends Plugin {
       conflictPending: false,
       conflictPath: '',
     });
-    this.reverifyChallenge = await this.buildReverifyChallenge(key, salt, KDF_ITERATIONS);
+    this.reverifyChallenge = await this.buildReverifyChallenge(kek, salt, KDF_ITERATIONS);
     this.failureCount = 0;
     this.blockedUntil = 0;
     this.settings.initializedPath = path;
@@ -3609,22 +5922,25 @@ class XUSecretVault extends Plugin {
     } catch (error) {
       console.error('[' + PLUGIN_ID + '] save settings failed:', error);
     }
-    return true;
+    // 恢复码只在创建向导里显示一次；不落盘、不写日志
+    return { ok: true, recoveryCode: formatRecoveryCode(recoveryCode), recoveryCodeRaw: recoveryCode };
   }
 
-  // 重验挑战：会话内随机口令用会话密钥加密一次；重验必须付同样的 KDF 成本并解开它
-  async buildReverifyChallenge(key, salt, iterations) {
+  // 重验挑战：会话内随机口令用 KEK 加密一次；重验必须付同样的 KDF 成本并解开它
+  async buildReverifyChallenge(key, salt, iterations, aadOverride) {
     const cryptoObj = this.requireCrypto();
     const iv = randomBytes(cryptoObj, IV_BYTES);
     const marker = bytesToBase64(randomBytes(cryptoObj, 16));
-    const aad = buildAad(
-      AAD_PREFIX,
-      FORMAT_VERSION,
-      KDF_ALGO,
-      iterations,
-      bytesToBase64(salt),
-      CIPHER_ALGO
-    );
+    const aad =
+      aadOverride ||
+      buildWrapAadV3(
+        'password',
+        FORMAT_VERSION,
+        KDF_ALGO,
+        iterations,
+        bytesToBase64(salt),
+        CIPHER_ALGO
+      );
     const ciphertext = await cryptoObj.subtle.encrypt(
       { name: 'AES-GCM', iv, additionalData: aad, tagLength: TAG_LENGTH },
       key,
@@ -3642,6 +5958,98 @@ class XUSecretVault extends Plugin {
     this.failureCount += 1;
     const backoff = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * Math.pow(2, this.failureCount - 1));
     this.blockedUntil = this.nowMs() + backoff;
+  }
+
+  // 解开 v3 信封：密码 KEK 解包裹 DEK / 主密钥，再用 DEK 解内容
+  async openV3SessionFromEnvelope(envelope, password, extra) {
+    const cryptoObj = this.requireCrypto();
+    const saltBase64 = String(envelope.kdf.salt);
+    const salt = base64ToBytes(saltBase64);
+    const iterations = Number(envelope.kdf.iterations);
+    const kek = await this.deriveKey(password, salt, iterations);
+    const passwordAad = buildWrapAadV3(
+      'password',
+      FORMAT_VERSION,
+      KDF_ALGO,
+      iterations,
+      saltBase64,
+      CIPHER_ALGO
+    );
+    const rawDek = await unwrapRawKey(cryptoObj, kek, envelope.wrappedDek, passwordAad);
+    const rawMasterKey = await unwrapRawKey(
+      cryptoObj,
+      kek,
+      envelope.wrappedMasterKey,
+      buildWrapAadV3('master', FORMAT_VERSION, KDF_ALGO, iterations, saltBase64, CIPHER_ALGO)
+    );
+    const dekKey = await importAesGcmKey(cryptoObj, rawDek);
+    const data = await this.decryptEnvelope(envelope, dekKey);
+    const payload = decodePayload(data);
+    if (!payload) throw new Error(this.t('err_vault_corrupt'));
+    return Object.assign(
+      {
+        data: payload,
+        rawDek,
+        kek,
+        rawMasterKey,
+        salt,
+        saltBase64,
+        iterations,
+        fileId: base64ToBytes(envelope.fileId),
+        fileIdBase64: String(envelope.fileId),
+        formatVersion: FORMAT_VERSION,
+        recovery: envelope.recovery || null,
+        recoveryCode: envelope.recoveryCode || null,
+      },
+      extra || {}
+    );
+  }
+
+  // 把 v1/v2 文件迁移到 v3：成功时保留 .bak，失败时 writeEnvelope 会恢复原字节
+  async migrateLegacyEnvelopeToV3(path, envelope, data, password, generation, options) {
+    const opts = options || {};
+    const cryptoObj = this.requireCrypto();
+    const saltBase64 = String(envelope.kdf.salt);
+    const salt = base64ToBytes(saltBase64);
+    const iterations = Number(envelope.kdf.iterations);
+    const kek = await this.deriveKey(password, salt, iterations);
+    const rawDek = randomBytes(cryptoObj, DEK_BYTES);
+    const rawMasterKey = this.rawMasterKey || randomBytes(cryptoObj, MASTER_KEY_BYTES);
+    const fileId = randomBytes(cryptoObj, FILE_ID_BYTES);
+    const ctx = {
+      rawDek,
+      kek,
+      salt,
+      iterations,
+      fileId,
+      rawMasterKey,
+      recovery: this.sessionRecovery,
+      recoveryCode: this.sessionRecoveryCode,
+    };
+    const notes = data.notes || [];
+    await this.writeEnvelope(data.entries || [], null, salt, iterations, path, true, {
+      generation,
+      v3Ctx: ctx,
+      notes,
+      keepBackup: true,
+    });
+    const text = await this.readVaultText(path);
+    return {
+      data,
+      rawDek,
+      kek,
+      rawMasterKey,
+      salt,
+      saltBase64,
+      iterations,
+      fileId,
+      fileIdBase64: bytesToBase64(fileId),
+      formatVersion: FORMAT_VERSION,
+      recovery: ctx.recovery || null,
+      recoveryCode: ctx.recoveryCode || null,
+      hash: await this.hashText(text),
+      migrated: true,
+    };
   }
 
   // 统一失败口径：文件缺失/JSON 畸形/base64 损坏/密码错误都 return false，不抛原始异常
@@ -3664,54 +6072,158 @@ class XUSecretVault extends Plugin {
       }
       const text = await this.readVaultText(path);
       const envelope = this.parseEnvelope(text);
-      const iterations = Number(envelope.kdf.iterations);
-      const saltBase64 = String(envelope.kdf.salt);
-      const salt = base64ToBytes(saltBase64);
-      const key = await this.deriveKey(password, salt, iterations);
-      let data;
-      try {
-        data = await this.decryptEnvelope(envelope, key);
-      } catch (error) {
-        this.registerUnlockFailure();
-        this.lastUnlockError = this.t('err_unlock_failed');
-        return false;
+      const formatVersion = Number(envelope.formatVersion);
+      const previousMasterKey = this.rawMasterKey;
+      const previousRecovery = this.sessionRecovery;
+      const previousRecoveryCode = this.sessionRecoveryCode;
+      this.sessionGeneration += 1;
+      const generation = this.sessionGeneration;
+      let session = null;
+      let legacy = null;
+      if (formatVersion === FORMAT_VERSION) {
+        try {
+          session = await this.openV3SessionFromEnvelope(envelope, password);
+        } catch (error) {
+          this.registerUnlockFailure();
+          this.lastUnlockError = this.t('err_unlock_failed');
+          return false;
+        }
+      } else {
+        const saltBase64 = String(envelope.kdf.salt);
+        const salt = base64ToBytes(saltBase64);
+        const iterations = Number(envelope.kdf.iterations);
+        let key;
+        let data;
+        try {
+          key = await this.deriveKey(password, salt, iterations);
+          data = await this.decryptEnvelope(envelope, key);
+          if (!decodePayload(data)) throw new Error('invalid payload');
+        } catch (error) {
+          this.registerUnlockFailure();
+          this.lastUnlockError = this.t('err_unlock_failed');
+          return false;
+        }
+        legacy = {
+          data: decodePayload(data),
+          key,
+          salt,
+          saltBase64,
+          iterations,
+          formatVersion,
+          hash: await this.hashText(text),
+        };
+        // 迁移期间让 writeEnvelope 能用本次 generation；失败则保持原字节并继续以旧格式工作
+        this.rawMasterKey = previousMasterKey;
+        this.sessionRecovery = previousRecovery;
+        this.sessionRecoveryCode = previousRecoveryCode;
+        try {
+          session = await this.migrateLegacyEnvelopeToV3(
+            path,
+            envelope,
+            legacy.data,
+            password,
+            generation
+          );
+          session.hash = await this.hashText(await this.readVaultText(path));
+          new Notice(
+            this.t(formatVersion === LEGACY_FORMAT_VERSION ? 'notice_upgraded_v1' : 'notice_upgraded_v2'),
+            8000
+          );
+        } catch (error) {
+          if (error && error.discarded) {
+            // 锁定中断：本次解锁不再继续
+            return false;
+          }
+          console.error('[' + PLUGIN_ID + '] legacy upgrade failed:', error);
+          if (!this.v1UpgradeWarned) {
+            this.v1UpgradeWarned = true;
+            new Notice(this.t('notice_upgrade_failed'), 8000);
+          }
+        }
       }
-      if (!decodePayload(data)) throw new Error('invalid payload');
-      const payload = decodePayload(data);
-      const entries = payload.entries.map((item, index) => normalizeStoredEntry(item, 'restored-' + index));
-      let notes = payload.notes.map((item, index) => normalizeStoredNote(item, 'note-' + index));
-      // 旧数据只有 entries：自动补一篇默认笔记，下次保存时随密文一起写入
-      if (!notes.length) notes = [createDefaultNote()];
+
       this.failureCount = 0;
       this.blockedUntil = 0;
-      this.sessionGeneration += 1;
-      this.sessionPassword = normalizePassword(password);
-      this.selectedFilePath = path;
-      this.sessionKey = key;
-      this.sessionSalt = salt;
-      this.sessionIterations = iterations;
-      this.entries = entries;
-      this.notes = notes;
-      this.contentVersion = payload.contentVersion;
-      this.vaultState = 'present';
       this.suspended = false;
       this.suspendReason = '';
       this.stopCountdown();
       this.hiddenAt = 0;
       this.hiddenAtWall = 0;
-      this.knownBlobHash = await this.hashText(text);
-      this.fileSessions.set(path, {
-        key,
-        salt,
-        saltBase64: saltBase64,
-        iterations,
-        hash: this.knownBlobHash,
-        conflictPending: false,
-        conflictPath: '',
-      });
-      this.reverifyChallenge = await this.buildReverifyChallenge(key, salt, iterations);
+      let entries;
+      let notes;
+      if (session) {
+        await this.applyV3Session(Object.assign({}, session, { password: normalizePassword(password), hash: session.hash != null ? session.hash : await this.hashText(text) }));
+        entries = this.entries;
+        notes = this.notes;
+        this.sessionGeneration = generation;
+        this.reverifyChallenge = await this.buildReverifyChallenge(
+          this.sessionKek,
+          this.sessionSalt,
+          this.sessionIterations
+        );
+        this.fileSessions.set(path, {
+          key: this.sessionKey,
+          kek: this.sessionKek,
+          rawDek: this.rawDek,
+          rawMasterKey: this.rawMasterKey,
+          fileId: this.sessionFileId,
+          fileIdBase64: this.sessionFileIdBase64,
+          formatVersion: FORMAT_VERSION,
+          legacyKey: null,
+          recovery: this.sessionRecovery,
+          recoveryCode: this.sessionRecoveryCode,
+          salt: this.sessionSalt,
+          saltBase64: bytesToBase64(this.sessionSalt),
+          iterations: this.sessionIterations,
+          hash: this.knownBlobHash,
+          conflictPending: false,
+          conflictPath: '',
+        });
+      } else {
+        this.applyLegacySession(Object.assign({}, legacy, { password: normalizePassword(password) }));
+        entries = this.entries;
+        notes = this.notes;
+        this.reverifyChallenge = await this.buildReverifyChallenge(
+          legacy.key,
+          legacy.salt,
+          legacy.iterations,
+          buildAad(
+            AAD_PREFIX,
+            legacy.formatVersion,
+            KDF_ALGO,
+            legacy.iterations,
+            legacy.saltBase64,
+            CIPHER_ALGO
+          )
+        );
+        this.fileSessions.set(path, {
+          key: legacy.key,
+          kek: null,
+          rawDek: null,
+          rawMasterKey: null,
+          fileId: null,
+          fileIdBase64: '',
+          formatVersion: legacy.formatVersion,
+          legacyKey: legacy.key,
+          recovery: null,
+          recoveryCode: null,
+          salt: legacy.salt,
+          saltBase64: legacy.saltBase64,
+          iterations: legacy.iterations,
+          hash: legacy.hash,
+          conflictPending: false,
+          conflictPath: '',
+        });
+      }
+      if (!notes.length) {
+        notes = [createDefaultNote()];
+        this.notes = notes;
+      }
+      this.vaultState = 'present';
       this.conflictPending = false;
       this.conflictPath = '';
+      this.selectedFilePath = path;
+      this.selectedVaultPath = '';
       // 记录当前文件路径（不用冲突副本路径），用于"文件缺失"判断
       this.settings.initializedPath = this.normalizeVaultPath(path);
       this.settings.selectedFile = this.normalizeVaultPath(path);
@@ -3720,23 +6232,6 @@ class XUSecretVault extends Plugin {
       // 若解锁的是冲突副本，列表会把"上次文件"修正回正式库；缺失态判断也用修正后的路径
       if (this.settings.selectedFile) this.settings.initializedPath = this.settings.selectedFile;
       this.refreshViews();
-      // v1 兼容读取成功：提示并升级为 v2；升级失败不影响本次解锁
-      if (Number(envelope.formatVersion) === LEGACY_FORMAT_VERSION) {
-        try {
-          await this.writeEnvelope(entries, key, salt, iterations, path, true, {
-            generation: this.sessionGeneration,
-            guardExternal: true,
-          });
-          new Notice(this.t('notice_upgraded_v1'), 8000);
-        } catch (error) {
-          console.error('[' + PLUGIN_ID + '] v1 upgrade failed:', error);
-          // 升级失败只在生命周期内提示一次，避免每次解锁重复打扰
-          if (!this.v1UpgradeWarned) {
-            this.v1UpgradeWarned = true;
-            new Notice(this.t('notice_upgrade_failed'), 8000);
-          }
-        }
-      }
       try {
         await this.saveSettings();
       } catch (error) {
@@ -3814,9 +6309,20 @@ class XUSecretVault extends Plugin {
   lock() {
     const hadSession = this.isUnlocked();
     this.sessionGeneration += 1;
+    if (this.batchActive) this.batchAbortRequested = true;
     this.sessionKey = null;
     this.sessionSalt = null;
     this.sessionIterations = KDF_ITERATIONS;
+    this.sessionKek = null;
+    this.rawDek = null;
+    this.rawMasterKey = null;
+    this.sessionFileId = null;
+    this.sessionFileIdBase64 = '';
+    this.sessionFormatVersion = FORMAT_VERSION;
+    this.sessionRecovery = null;
+    this.sessionRecoveryCode = null;
+    this.sessionLegacyKey = null;
+    this.pendingRecovery = null;
     this.entries = [];
     this.notes = [];
     this.contentVersion = 0;

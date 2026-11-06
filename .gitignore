@@ -5,3 +5,12 @@ node_modules/
 Thumbs.db
 .idea/
 .vscode/
+
+# 本地保险库与测试残留
+xu-secrets/
+xu-secrets.enc
+xu-secrets.enc.bak
+*.bak
+*.tmp-*
+*.conflict-*
+coverage/

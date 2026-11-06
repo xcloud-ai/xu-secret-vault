@@ -653,3 +653,195 @@
     flex-wrap: wrap;
   }
 }
+
+/* 0.5.0 密码强度估算器 */
+.xsv-hidden {
+  display: none;
+}
+
+.xsv-strength {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.xsv-strength-title {
+  font-size: 0.72em;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
+
+.xsv-strength-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xsv-strength-tier {
+  font-size: 0.78em;
+  font-weight: 600;
+}
+
+.xsv-strength-danger {
+  color: var(--color-red);
+}
+
+.xsv-strength-medium {
+  color: var(--color-orange);
+}
+
+.xsv-strength-safe {
+  color: var(--color-green);
+}
+
+.xsv-strength-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.xsv-strength-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+  transition: width 160ms ease-out, background-color 160ms ease-out;
+}
+
+.xsv-strength-fill.xsv-strength-danger {
+  background: var(--color-red);
+}
+
+.xsv-strength-fill.xsv-strength-medium {
+  background: var(--color-orange);
+}
+
+.xsv-strength-fill.xsv-strength-safe {
+  background: var(--color-green);
+}
+
+.xsv-strength-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.xsv-strength-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+}
+
+.xsv-strength-label {
+  font-size: 0.66em;
+  color: var(--text-faint);
+}
+
+.xsv-strength-value {
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-normal);
+}
+
+.xsv-strength-short-hint {
+  color: var(--color-orange);
+}
+
+/* 0.5.0 密保问题 */
+.xsv-question-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.xsv-question-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+
+.xsv-question-row .xsv-input {
+  width: 100%;
+}
+
+.xsv-question-custom {
+  width: 100%;
+}
+
+/* 0.5.0 恢复码 */
+.xsv-recovery-code {
+  font-family: var(--font-monospace);
+  font-size: 1.05em;
+  letter-spacing: 0.12em;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  word-break: break-all;
+  user-select: all;
+  text-align: center;
+}
+
+/* 0.5.0 批量改密/恢复进度 */
+.xsv-batch-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+
+.xsv-batch-title {
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.xsv-batch-progress {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.xsv-batch-interrupted {
+  border-left-color: var(--color-red);
+  color: var(--text-normal);
+}
+
+.xsv-setup-step-title {
+  font-size: 0.86em;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.xsv-mode-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.xsv-mode-row label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 0.8em;
+}

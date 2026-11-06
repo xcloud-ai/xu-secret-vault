@@ -11,6 +11,13 @@ const MAIN = path.join(__dirname, '..', 'main.js');
 const VAULT_PATH = 'xu-secrets/我的密钥.enc';
 
 const MASTER = 'MASTER-PASSWORD-DO-NOT-LEAK-789';
+const MASTER_NEXT = 'ROTATED-PASSWORD-DO-NOT-LEAK-321';
+const RESTORED = 'RESTORED-PASSWORD-DO-NOT-LEAK-654';
+const RECOVERY_ANSWERS = [
+  'my first cat was a black one named midnight',
+  '  MY   SECOND   BIKE  WAS  A  BLUE  FIXIE  ',
+  'We Moved To Shanghai In The Spring Of 2019',
+];
 const SECRET_ONE = 'SECRET-ALPHA-DO-NOT-LEAK-123';
 const SECRET_TWO = 'SECRET-BETA-DO-NOT-LEAK-456';
 const SECRET_THREE = 'SECRET-GAMMA-DO-NOT-LEAK-000';
@@ -156,6 +163,7 @@ function makeEl(tag, options) {
     rows: 0,
     autocomplete: '',
     spellcheck: true,
+    placeholder: '',
     attributes: {},
     style: {},
     _classes: new Set(),
@@ -164,6 +172,7 @@ function makeEl(tag, options) {
   if (opts.cls) String(opts.cls).split(/\s+/).filter(Boolean).forEach((name) => el._classes.add(name));
   if (opts.text !== undefined) el.textContent = String(opts.text);
   if (opts.type) el.type = opts.type;
+  if (opts.placeholder !== undefined) el.placeholder = String(opts.placeholder);
   el.classList = {
     add: (name) => el._classes.add(name),
     remove: (name) => el._classes.delete(name),
@@ -258,11 +267,14 @@ const notices = [];
 let clipboard = '';
 let clipboardReadFailure = false;
 let writeBehavior = null; // null | 'throw-before' | 'throw-partial'
+let writeHook = null; // 写成功后注入（用于在批量中途触发锁定）
 let renameCorruptOnce = false; // 模拟 rename 后终检失败（用于测试 .bak 回滚）
+let renameFailOnce = null; // 模拟某个目标路径的 tmp→正式文件 rename 失败（批量回滚测试）
 let removeFailure = false; // 模拟删除原文件失败（回滚分支）
 let renameTargetFailureOnce = false; // 模拟 tmp 落位 rename 失败
 let afterReadHook = null; // 读取后注入外部改动（模拟 TOCTOU 窗口）
 let activePlugin = null;
+const modals = [];
 
 const app = {
   vault: {
@@ -285,10 +297,15 @@ const app = {
           fileStore.set(filePath, String(text).slice(0, Math.max(0, String(text).length - 24)));
           throw new Error('simulated partial write');
         }
+        if (writeHook) writeHook(filePath);
         fileStore.set(filePath, String(text));
       },
       rename: async (fromPath, toPath) => {
         if (!fileStore.has(fromPath)) throw new Error('rename source missing: ' + fromPath);
+        if (renameFailOnce && toPath === renameFailOnce && fromPath.indexOf('.tmp-') >= 0) {
+          renameFailOnce = null;
+          throw new Error('simulated batch rename failure');
+        }
         // 真实 Obsidian DataAdapter.rename：目标已存在时直接抛错，不会静默覆盖
         if (fileStore.has(toPath)) throw new Error('Destination file already exists!');
         if (renameCorruptOnce && toPath === VAULT_PATH) {
@@ -427,6 +444,7 @@ class Modal {
     this.contentEl = makeEl('div');
     this.titleEl = makeEl('div');
     this.isOpen = false;
+    modals.push(this);
   }
   open() {
     this.isOpen = true;
@@ -453,7 +471,50 @@ class PluginSettingTab {
   update() {}
 }
 
-class Setting {}
+class Setting {
+  constructor(containerEl) {
+    this.containerEl = containerEl || makeEl('div');
+    this.buttons = [];
+  }
+  setName() {
+    return this;
+  }
+  setDesc() {
+    return this;
+  }
+  setHeading() {
+    return this;
+  }
+  setClass() {
+    return this;
+  }
+  addButton(callback) {
+    const button = {
+      text: '',
+      handler: null,
+      setButtonText(text) {
+        this.text = String(text);
+        return this;
+      },
+      setCta() {
+        return this;
+      },
+      setWarning() {
+        return this;
+      },
+      setDisabled() {
+        return this;
+      },
+      onClick(handler) {
+        this.handler = handler;
+        return this;
+      },
+    };
+    this.buttons.push(button);
+    if (typeof callback === 'function') callback(button);
+    return this;
+  }
+}
 
 class Plugin {
   constructor(pluginApp, manifest) {
@@ -582,17 +643,89 @@ try {
     (el) => el.tagName === 'INPUT' && el.type === 'password'
   );
   ok(passwordInputs.length === 2, '首次界面包含主密码与确认输入框');
+
+  // 1a) 创建流程接入强度估算器（200ms 防抖、两列 ETA、三档标签）
+  const strengthMeter = findAll(view.contentEl, (el) => el.hasClass('xsv-strength'))[0];
+  ok(!!strengthMeter, '创建主密码界面接入强度估算组件');
+  ok(!!strengthMeter && textOf(strengthMeter).indexOf('单张高端显卡') >= 0, '强度组件包含单卡 ETA 列');
+  ok(!!strengthMeter && textOf(strengthMeter).indexOf('多卡/集群') >= 0, '强度组件包含集群 ETA 列');
+  ok(
+    !!strengthMeter && textOf(strengthMeter).indexOf('这是离线爆破估算') >= 0,
+    '强度组件写明离线爆破边界文案'
+  );
+  ok(
+    !!strengthMeter && textOf(strengthMeter).indexOf('参数调整后时间会变') >= 0,
+    '强度组件写明参数变化边界文案'
+  );
+  passwordInputs[0].value = 'Password123!';
+  passwordInputs[0].fire('input');
+  await delay(260);
+  ok(textOf(strengthMeter).indexOf('危险（秒级）') >= 0, 'Password123! 经 200ms 防抖后判为危险');
+  // 危险档必须二次确认，且确认文案包含估算耗时
+  passwordInputs[1].value = 'Password123!';
+  const dangerNext = findButton(view.contentEl, '下一步');
+  modals.length = 0;
+  dangerNext.click();
+  ok(modals.length === 1 && modals[0].titleEl.textContent === plugin.t('strength_confirm_title'), '危险密码进入下一步前弹出二次确认');
+  ok(
+    String(textOf(modals[0].contentEl)).indexOf('单卡') >= 0 &&
+      String(textOf(modals[0].contentEl)).indexOf('集群') >= 0,
+    '危险确认文案包含两档估算耗时'
+  );
+  const dangerCancel = findButton(modals[0].contentEl, '取消');
+  ok(!!dangerCancel, '危险确认可取消');
+  dangerCancel.click();
+  ok(view.setupStep === 'password', '取消危险确认后停留在密码步骤');
+  passwordInputs[0].value = '123456';
+  passwordInputs[0].fire('input');
+  await delay(260);
+  ok(textOf(strengthMeter).indexOf('≤6 位纯数字') >= 0, '≤6 位纯数字给出额外提示');
   passwordInputs[0].value = MASTER;
+  passwordInputs[0].fire('input');
   passwordInputs[1].value = MASTER;
+
+  const nextButton = findButton(view.contentEl, '下一步');
+  ok(!!nextButton, '创建向导第一步为「下一步」');
+  let initialRecoveryCode = '';
+  nextButton.click();
+  ok(
+    String(textOf(view.contentEl)).indexOf('第二步：设置密保问题') >= 0,
+    '下一步进入密保问题步骤（可选）'
+  );
+  const questionSelects = findAll(view.contentEl, (el) => el.tagName === 'SELECT');
+  ok(questionSelects.length === 3, '密保步骤包含三个问题下拉框');
+  for (let index = 0; index < 3; index += 1) {
+    questionSelects[index].value = plugin.t('question_preset_' + (index + 1));
+  }
+  const answerInputs = findAll(
+    view.contentEl,
+    (el) => el.tagName === 'INPUT' && String(el.placeholder || '').indexOf('答案') === 0
+  );
+  ok(answerInputs.length === 3, '密保步骤包含三个答案输入框');
+  answerInputs.forEach((input, index) => {
+    input.value = RECOVERY_ANSWERS[index];
+  });
   const createButton = findButton(view.contentEl, '创建保险库');
-  ok(!!createButton, '找到创建保险库按钮');
+  ok(!!createButton, '密保步骤提供创建保险库按钮');
   const createStart = Date.now();
   createButton.click();
+  await waitFor(() => view.setupStep === 'recoveryCode', '创建保险库并进入恢复码步骤');
+  initialRecoveryCode = view.setupRecoveryCode;
+  ok(
+    /^[A-Z2-7]{4}(-[A-Z2-7]{4}){7}$/.test(initialRecoveryCode),
+    '恢复码为 Base32、32 字符、每 4 字符分组（8 组）'
+  );
+  const recoveryCodeEl = findAll(view.contentEl, (el) => el.hasClass('xsv-recovery-code'))[0];
+  ok(!!recoveryCodeEl && recoveryCodeEl.textContent === initialRecoveryCode, '恢复码在界面只显示一次');
+  const savedButton = findButton(view.contentEl, '我已保存');
+  ok(!!savedButton, '恢复码步骤有「我已保存」按钮');
+  savedButton.click();
   await waitFor(
     () => plugin.isUnlocked() && plugin.settings.initializedPath === VAULT_PATH,
     '创建保险库完成'
   );
   const createMs = Date.now() - createStart;
+  ok(view.setupRecoveryCode === '', '点「我已保存」后视图状态清除恢复码');
 
   ok(fileStore.has(VAULT_PATH), '创建后生成密文文件 ' + VAULT_PATH);
   ok(tmpFiles().length === 0, '原子写完成后没有残留 .tmp');
@@ -603,14 +736,336 @@ try {
   ok(plugin.settings.initializedPath === VAULT_PATH, '记录已初始化路径（用于区分首次使用与文件缺失）');
 
   const env0 = JSON.parse(fileStore.get(VAULT_PATH));
-  ok(env0.formatVersion === 2, '信封 formatVersion=2');
+  ok(env0.formatVersion === 3, '信封 formatVersion=3（DEK + KEK v3）');
   ok(env0.kdf.algo === 'PBKDF2-SHA512', 'KDF 算法记录为 PBKDF2-SHA512');
   ok(Number(env0.kdf.iterations) === 600000, 'KDF 迭代数记录为 600000');
   ok(Buffer.from(env0.kdf.salt, 'base64').length === 16, '信封盐为 16 字节');
   ok(Buffer.from(env0.cipher.iv, 'base64').length === 12, '信封 IV 为 12 字节');
   ok(env0.cipher.algo === 'AES-256-GCM', '加密算法记录为 AES-256-GCM');
+  ok(Buffer.from(env0.fileId, 'base64').length === 16, 'v3 信封含 16 字节永久 fileId');
+  ok(Buffer.from(env0.wrappedDek.iv, 'base64').length === 12, 'wrappedDek 使用 12 字节 IV');
+  ok(!!env0.wrappedMasterKey && Buffer.from(env0.wrappedMasterKey.iv, 'base64').length === 12, '信封含主密钥包裹层');
+  ok(
+    !!env0.wrappedDekByMaster && Buffer.from(env0.wrappedDekByMaster.iv, 'base64').length === 12,
+    '信封含主密钥→DEK 包裹层（跨文件恢复用）'
+  );
+  ok(Number(env0.recovery.kdf.iterations) === 1000000, '密保恢复 KDF 迭代数为 1,000,000');
+  ok(env0.recovery.questions.length === 3, '信封记录三个密保问题文本');
+  ok(!!env0.recoveryCode && Number(env0.recoveryCode.kdf.iterations) === 100000, '信封含恢复码包裹块');
   ok(!('entries' in env0), '信封中不存在明文 entries 字段');
   ok(!('updatedAt' in env0), '信封头不再明文暴露 updatedAt');
+
+  /* ---------------- 0.5.0 / 0.5.1 ---------------- */
+  // 1c) 批量改密覆盖全部 .enc（含分组）：快速档 / 彻底轮换 / 整批回滚 / 锁定中断
+  const fileTwoResult = await plugin.createVaultFile('财务/公积金', '');
+  const fileThreeResult = await plugin.createVaultFile('生活/证件/旅行', '');
+  ok(fileTwoResult.ok === true && fileThreeResult.ok === true, '跨分组新建两个文件');
+  const batchPaths = [VAULT_PATH, fileTwoResult.path, fileThreeResult.path];
+  await plugin.switchVaultFile(VAULT_PATH);
+  await plugin.scanVaultFiles();
+  ok(
+    plugin.batchTargetFiles().length === 3 &&
+      plugin.batchTargetFiles().indexOf(fileTwoResult.path) >= 0 &&
+      plugin.batchTargetFiles().indexOf(fileThreeResult.path) >= 0,
+    '批量目标覆盖三个文件（含两个分组）'
+  );
+  const unlockAll = async (password) => {
+    plugin.lock();
+    restart();
+    if (!(await plugin.unlock(password))) return false;
+    const list = plugin.vaultFiles.map((file) => file.path);
+    if (!list.length) return false;
+    for (const path of list) {
+      if (path === plugin.getVaultPath()) continue;
+      if (!(await plugin.switchVaultFile(path))) return false;
+    }
+    return true;
+  };
+  const envelopeMap = () => {
+    const map = new Map();
+    for (const path of batchPaths) map.set(path, JSON.parse(fileStore.get(path)));
+    return map;
+  };
+  const bytesMap = () => {
+    const map = new Map();
+    for (const path of batchPaths) map.set(path, fileStore.get(path));
+    return map;
+  };
+
+  const quickBefore = envelopeMap();
+  const quickProgress = [];
+  const batchQuickStart = Date.now();
+  await plugin.changeMasterPassword(MASTER, MASTER_NEXT, {
+    mode: 'quick',
+    onProgress: (batch) => quickProgress.push([batch.current, batch.total]),
+  });
+  const quickMs = Date.now() - batchQuickStart;
+  ok(plugin.lastBatchResult.ok === true && plugin.lastBatchResult.completed.length === 3, '快速改密覆盖全部 3 个文件');
+  ok(
+    quickProgress.some((entry) => entry[0] === 3 && entry[1] === 3),
+    '批量进度按 N/M 上报到 3/3'
+  );
+  for (const path of batchPaths) {
+    const before = quickBefore.get(path);
+    const after = JSON.parse(fileStore.get(path));
+    ok(after.kdf.salt !== before.kdf.salt, '每个文件都换用新 salt：' + path);
+    ok(after.fileId === before.fileId, '快速改密保持永久 fileId 不变：' + path);
+    ok(
+      after.payload === before.payload && after.cipher.iv === before.cipher.iv,
+      '快速改密不重加密内容（payload/IV 字节不变）：' + path
+    );
+    ok(after.wrappedDek.ciphertext !== before.wrappedDek.ciphertext, '包裹层已用新 KEK 重包：' + path);
+  }
+  ok((await plugin.verifyVaultPassword(MASTER)) === false, '快速改密后旧主密码失效');
+  ok((await plugin.verifyVaultPassword(MASTER_NEXT)) === true, '快速改密后新主密码有效');
+  ok((await unlockAll(MASTER_NEXT)) === true, '新密码可解锁全部 3 个文件');
+
+  // 彻底轮换：新 DEK + 重加密内容
+  const fullBefore = envelopeMap();
+  const fullStart = Date.now();
+  await plugin.changeMasterPassword(MASTER_NEXT, RESTORED, { mode: 'full' });
+  const fullMs = Date.now() - fullStart;
+  for (const path of batchPaths) {
+    const before = fullBefore.get(path);
+    const after = JSON.parse(fileStore.get(path));
+    ok(after.fileId === before.fileId, '彻底轮换仍保持 fileId 不变：' + path);
+    ok(after.payload !== before.payload, '彻底轮换重加密 payload：' + path);
+    ok(after.wrappedDek.ciphertext !== before.wrappedDek.ciphertext, '彻底轮换换用新 DEK：' + path);
+  }
+  ok((await plugin.verifyVaultPassword(MASTER_NEXT)) === false, '彻底轮换后上一档密码失效');
+  ok((await unlockAll(RESTORED)) === true, '彻底轮换后新密码可解锁全部文件');
+
+  // 回到 MASTER，便于后续用例
+  await plugin.changeMasterPassword(RESTORED, MASTER, { mode: 'quick' });
+  ok((await unlockAll(MASTER)) === true, '批量改回原主密码后全部文件可解锁');
+
+  // 中途写入失败：整批回滚为操作前字节
+  const order = plugin.batchTargetFiles();
+  const failPath = order[1];
+  const rollbackBefore = bytesMap();
+  renameFailOnce = failPath;
+  let batchRollbackError = null;
+  try {
+    await plugin.changeMasterPassword(MASTER, MASTER_NEXT, { mode: 'quick' });
+  } catch (error) {
+    batchRollbackError = error;
+  }
+  ok(!!batchRollbackError, '第 2 个文件写入失败时改密整体失败');
+  ok(
+    plugin.lastBatchResult.ok === false && plugin.lastBatchResult.rolledBack.indexOf(order[0]) >= 0,
+    '整批回滚记录已完成的文件'
+  );
+  for (const path of batchPaths) {
+    ok(fileStore.get(path) === rollbackBefore.get(path), '回滚后文件字节与操作前一致：' + path);
+  }
+  ok((await unlockAll(MASTER)) === true, '回滚后旧主密码仍能解开全部文件');
+  renameFailOnce = null;
+
+  // 批量进行中锁定：安全中断 + 回滚已完成文件
+  const interruptedBefore = bytesMap();
+  let hookWrites = 0;
+  writeHook = () => {
+    hookWrites += 1;
+    if (hookWrites === 2) {
+      writeHook = null;
+      plugin.lock();
+    }
+  };
+  let interruptError = null;
+  try {
+    await plugin.changeMasterPassword(MASTER, MASTER_NEXT, { mode: 'quick' });
+  } catch (error) {
+    interruptError = error;
+  } finally {
+    writeHook = null;
+  }
+  ok(!!interruptError, '批量中途锁定会中断改密');
+  ok(plugin.isUnlocked() === false, '锁定中断后保持锁定状态');
+  ok(
+    plugin.lastBatchResult.ok === false && plugin.lastBatchResult.rolledBack.length >= 1,
+    '中断时记录并回滚已完成的文件'
+  );
+  for (const path of batchPaths) {
+    ok(fileStore.get(path) === interruptedBefore.get(path), '锁定中断回滚后字节不变：' + path);
+  }
+  ok((await unlockAll(MASTER)) === true, '锁定中断回滚后旧密码仍可解全部文件');
+
+  // 批量进行中禁止切换 / 新建 / 编辑
+  plugin.batchActive = true;
+  const guardNotices = notices.length;
+  const guardSwitch = await plugin.switchVaultFile(fileTwoResult.path);
+  const guardCreate = await plugin.createVaultFile('批量禁止', '');
+  let guardSaveError = null;
+  try {
+    await plugin.saveNote('note-primary', 'batch-guard-should-not-write');
+  } catch (error) {
+    guardSaveError = error;
+  }
+  ok(guardSwitch === false, '批量期间禁止切换文件');
+  ok(guardCreate.ok === false, '批量期间禁止新建文件');
+  ok(!!guardSaveError && String(guardSaveError.message).indexOf('批量') >= 0, '批量期间禁止编辑写盘');
+  ok(
+    notices.slice(guardNotices).some((message) => message.indexOf('批量') >= 0),
+    '批量期间写操作给出明确提示'
+  );
+  plugin.batchActive = false;
+  plugin.batch = null;
+
+  // 1d) 改密码弹窗同样接入强度估算组件（与创建流程同一个组件）
+  const settingDefs = plugin.__settingTab.getSettingDefinitions();
+  const securityGroup = settingDefs.find(
+    (entry) => entry.type === 'group' && entry.heading === plugin.t('setting_group_security')
+  );
+  ok(!!securityGroup, '设置页有安全分组');
+  const changePasswordItem = securityGroup.items.find((item) => item.name === plugin.t('security_change_password'));
+  ok(!!changePasswordItem && typeof changePasswordItem.render === 'function', '设置页提供修改主密码入口');
+  const settingStub = new Setting();
+  changePasswordItem.render(settingStub);
+  ok(settingStub.buttons.length === 1 && typeof settingStub.buttons[0].handler === 'function', '修改主密码按钮可点击');
+  modals.length = 0;
+  settingStub.buttons[0].handler();
+  const changeModal = modals[modals.length - 1];
+  ok(!!changeModal && !!findByClass(changeModal.contentEl, 'xsv-strength'), '改密码弹窗接入同一个强度估算组件');
+  ok(String(textOf(changeModal.contentEl)).indexOf('单张高端显卡') >= 0, '改密码弹窗包含单卡 ETA');
+  ok(String(textOf(changeModal.contentEl)).indexOf('多卡/集群') >= 0, '改密码弹窗包含集群 ETA');
+  ok(String(textOf(changeModal.contentEl)).indexOf('快速改密') >= 0, '改密码弹窗明示快速档');
+  ok(String(textOf(changeModal.contentEl)).indexOf('彻底轮换') >= 0, '改密码弹窗明示彻底轮换');
+  changeModal.close();
+
+  // 1e) 强度估算器：典型密码与惩罚项
+  const strengthCases = {
+    p1: plugin.evaluatePasswordStrength('Password123!'),
+    p2: plugin.evaluatePasswordStrength('Xk9#mQ2!vL7@'),
+    p3: plugin.evaluatePasswordStrength('123456'),
+    abc: plugin.evaluatePasswordStrength('abc123'),
+    qwerty: plugin.evaluatePasswordStrength('qwerty'),
+    repeat: plugin.evaluatePasswordStrength('aaaa1111'),
+    year: plugin.evaluatePasswordStrength('2024'),
+    phone: plugin.evaluatePasswordStrength('13800138000'),
+ naive: plugin.evaluatePasswordStrength('correct horse battery staple'),
+  };
+  ok(strengthCases.p1.tier === 'danger' && strengthCases.p1.secondsSingle < 1, 'Password123! 判为危险（秒级）');
+  ok(strengthCases.p3.tier === 'danger', '123456 判为危险');
+  ok(strengthCases.p2.tier === 'safe' && strengthCases.p2.secondsSingle > 31557600, 'Xk9#mQ2!vL7@ 判为安全（年以上）');
+  ok(strengthCases.abc.tier === 'danger', '字典词 abc123 判为危险');
+  ok(strengthCases.qwerty.tier === 'danger', '键盘序列 qwerty 判为危险');
+  ok(strengthCases.repeat.tier === 'danger', '重复字符 aaaa1111 判为危险');
+  ok(strengthCases.year.tier !== 'safe', '四位年份 2024 不被判为安全');
+  ok(strengthCases.phone.tier !== 'safe', '手机号形态给出惩罚（不判为安全）');
+  ok(strengthCases.naive.tier === 'safe', '四词口令按词表熵估算为安全');
+  console.log(
+    'STRENGTH Password123!=' + strengthCases.p1.secondsSingle +
+      ' Xk9#mQ2!vL7@=' + strengthCases.p2.secondsSingle +
+      ' 123456=' + strengthCases.p3.secondsSingle +
+      ' cluster=' + strengthCases.p2.secondsCluster
+  );
+
+  // 1f) 恢复码 → 主密钥：一次恢复解开全部文件，并强制设置新主密码
+  plugin.lock();
+  ok((await plugin.unlock(MASTER)) === true, '锁定后旧密码可再次解锁（恢复前基线）');
+  plugin.lock();
+  view.render();
+  const forgotButton = findButton(view.contentEl, '忘记主密码？');
+  ok(!!forgotButton, '解锁页提供「忘记主密码？」入口');
+  modals.length = 0;
+  forgotButton.click();
+  const forgotModal = modals[modals.length - 1];
+  ok(!!forgotModal && String(textOf(forgotModal.contentEl)).indexOf(plugin.t('forgot_risk')) >= 0, '忘记密码弹窗先展示风险说明');
+  ok(
+    !!findButton(forgotModal.contentEl, plugin.t('forgot_choose_code')) &&
+      !!findButton(forgotModal.contentEl, plugin.t('forgot_choose_questions')),
+    '忘记密码提供恢复码（推荐）与三题两条路'
+  );
+  forgotModal.close();
+  plugin.failureCount = 3;
+  plugin.blockedUntil = Date.now() + 60000;
+  const codeResult = await plugin.recoverWithCode(initialRecoveryCode);
+  ok(codeResult.ok === true, '恢复码可解出主密钥');
+  ok(plugin.pendingRecovery && !!plugin.pendingRecovery.rawMasterKey, '恢复码解出的是主密钥层（不是单文件 DEK）');
+  let shortRejected = false;
+  try {
+    await plugin.completeRecoveryPassword('short');
+  } catch (error) {
+    shortRejected = true;
+  }
+  ok(shortRejected, '恢复成功后强制要求新主密码（长度不足被拒）');
+  const codeReset = await plugin.completeRecoveryPassword(RESTORED);
+  ok(codeReset.ok === true && codeReset.total === 3, '强制新密码后全部 3 个文件重包');
+  ok(plugin.failureCount === 0 && plugin.blockedUntil === 0, '恢复成功后清空失败计数与退避');
+  ok((await unlockAll(RESTORED)) === true, '恢复后的新密码可解开全部文件');
+  ok((await unlockAll(MASTER)) === false, '恢复重包后旧主密码失效');
+  plugin.lock();
+  restart();
+  ok((await plugin.unlock(RESTORED)) === true, '恢复后的新密码可正常解锁');
+  await plugin.changeMasterPassword(RESTORED, MASTER, { mode: 'quick' });
+
+  // 恢复码校验位：输错一位直接拒绝
+  plugin.lock();
+  const typoCode = (initialRecoveryCode.charAt(0) === 'A' ? 'B' : 'A') + initialRecoveryCode.slice(1);
+  const typoResult = await plugin.recoverWithCode(typoCode);
+  ok(typoResult.ok === false, '恢复码输错一位被校验位拒绝');
+  plugin.failureCount = 0;
+  plugin.blockedUntil = 0;
+  ok((await plugin.unlock(MASTER)) === true, '恢复码失败不影响原有密码解锁');
+
+  // 1g) 三道密保：答案归一化 / 三题错一 / 问题文本被篡改
+  plugin.lock();
+  const questionsResult = await plugin.recoverWithQuestions(RECOVERY_ANSWERS);
+  ok(questionsResult.ok === true, '密保答案归一化后可解出主密钥');
+  const questionReset = await plugin.completeRecoveryPassword(RESTORED);
+  ok(questionReset.ok === true && questionReset.total === 3, '密保恢复后全部文件重包为新密码');
+  ok((await unlockAll(RESTORED)) === true, '密保恢复后的新密码可解锁全部文件');
+  plugin.lock();
+  restart();
+  ok((await plugin.unlock(RESTORED)) === true, '密保恢复后的新密码可正常解锁');
+  await plugin.changeMasterPassword(RESTORED, MASTER, { mode: 'quick' });
+
+  plugin.lock();
+  const wrongAnswer = await plugin.recoverWithQuestions([
+    'totally wrong answer one',
+    RECOVERY_ANSWERS[1],
+    RECOVERY_ANSWERS[2],
+  ]);
+  ok(wrongAnswer.ok === false, '三题错一（统一失败，不暴露第几题）');
+  plugin.failureCount = 0;
+  plugin.blockedUntil = 0;
+
+  const tamperQuestionsBefore = bytesMap();
+  for (const path of batchPaths) {
+    const envelope = JSON.parse(fileStore.get(path));
+    envelope.recovery.questions[0] = envelope.recovery.questions[0] + '（被篡改）';
+    fileStore.set(path, JSON.stringify(envelope, null, 2));
+  }
+  plugin.lock();
+  const tamperedQuestions = await plugin.recoverWithQuestions(RECOVERY_ANSWERS);
+  ok(tamperedQuestions.ok === false, '密保问题文本被篡改后恢复失败（问题文本参与 AAD）');
+  for (const path of batchPaths) fileStore.set(path, tamperQuestionsBefore.get(path));
+  plugin.failureCount = 0;
+  plugin.blockedUntil = 0;
+  plugin.lock();
+  restart();
+  ok((await plugin.unlock(MASTER)) === true, '恢复原文后主密码仍可解锁');
+
+  // 1h) 恢复码 / 密保答案不得落盘
+  const recoveryCodeRaw = initialRecoveryCode.replace(/-/g, '');
+  const persistedSettings = JSON.stringify(plugin.settings);
+  ok(
+    persistedSettings.indexOf(initialRecoveryCode) < 0 && persistedSettings.indexOf(recoveryCodeRaw) < 0,
+    'data.json 不保存恢复码（含原始 Base32）'
+  );
+  ok(persistedSettings.indexOf(RECOVERY_ANSWERS[0].trim()) < 0, 'data.json 不保存密保答案');
+  for (const path of batchPaths) {
+    const text = fileStore.get(path);
+    ok(text.indexOf(recoveryCodeRaw) < 0, '密文文件不包含恢复码明文：' + path);
+  }
+
+  // 1i) 清理新增文件，回到单文件初始状态
+  await plugin.switchVaultFile(VAULT_PATH);
+  await plugin.deleteVaultFile(fileTwoResult.path);
+  await plugin.deleteVaultFile(fileThreeResult.path);
+  await plugin.scanVaultFiles();
+  ok(plugin.batchTargetFiles().length === 1 && plugin.getVaultPath() === VAULT_PATH, '清理批量测试文件后回到初始单文件');
+  console.log('BATCH quickMs=' + quickMs + ' fullMs=' + fullMs + ' files=3');
 
   // 1b) 启动清理：只删本插件生成且超过 1 小时的 tmp，不得误删用户文件
   const nowStamp = (() => {
@@ -640,6 +1095,7 @@ try {
   fileStore.delete(VAULT_PATH + '.tmp-' + nowStamp + '-abcdef12');
 
   // 2) 条目数据层：0.3.0 起条目 CRUD 界面已下线，直接用插件 API 准备引用数据
+  const saltBeforeAdd = JSON.parse(fileStore.get(VAULT_PATH)).kdf.salt;
   const alphaEntry = await plugin.addEntry({
     name: 'Alpha',
     type: 'password',
@@ -654,7 +1110,7 @@ try {
   ok(plugin.entries[0].tags.join(',') === 'work,cloud', '标签按数组保存');
   const env1 = JSON.parse(fileStore.get(VAULT_PATH));
   ok(env1.cipher.iv !== env0.cipher.iv, '新增写盘生成了新的 IV');
-  ok(env1.kdf.salt === env0.kdf.salt, '同一保险库盐保持不变');
+  ok(env1.kdf.salt === saltBeforeAdd, '同一主密码会话内盐保持不变');
   ok(!fileStore.has(VAULT_PATH + '.bak'), '目标已存在时首次保存成功替换且不残留 .bak');
   ok(tmpFiles().length === 0, '首次保存不残留 .tmp');
 
@@ -806,7 +1262,7 @@ try {
   restoreVault(goodEnvelopeText);
 
   const tamperedVersion = JSON.parse(goodEnvelopeText);
-  tamperedVersion.formatVersion = 3;
+  tamperedVersion.formatVersion = 4;
   restoreVault(JSON.stringify(tamperedVersion, null, 2));
   ok((await unlockFresh(MASTER)) === false, '负向：未知版本被拒绝');
   ok(plugin.lastUnlockError === plugin.t('err_version_unsupported'), '未知版本明确提示「版本不支持」');
@@ -1245,12 +1701,27 @@ try {
   ok((await plugin.unlock(MASTER)) === true, 'v1 旧信封可兼容解锁');
   ok(plugin.entries.length === 1 && plugin.entries[0].content === SECRET_ONE, 'v1 条目内容正确');
   const upgraded = JSON.parse(fileStore.get(VAULT_PATH));
-  ok(upgraded.formatVersion === 2, 'v1 读取成功后自动升级为 v2');
+  ok(upgraded.formatVersion === 3, 'v1 读取成功后自动升级为 v3（DEK + KEK）');
   ok(notices.some((message) => message.indexOf('升级') >= 0), '升级给出提示');
   ok(String(fileStore.get(VAULT_PATH)).indexOf(SECRET_ONE) < 0, '负向：升级后的密文不含明文');
+  ok(fileStore.has(VAULT_PATH + '.bak'), 'v1 首次迁移保留 .bak 原始字节');
+  ok(
+    JSON.parse(fileStore.get(VAULT_PATH + '.bak')).formatVersion === 1,
+    '.bak 为迁移前的 v1 原始信封'
+  );
+  ok(
+    Buffer.from(upgraded.fileId, 'base64').length === 16 &&
+      !!upgraded.wrappedDek &&
+      !!upgraded.wrappedMasterKey,
+    '迁移生成的 v3 信封字段完整（fileId + 双层包裹）'
+  );
+  ok(
+    upgraded.recovery === undefined || upgraded.recovery === null,
+    '旧库迁移不伪造密保问题（无恢复块）'
+  );
 
   const unknownVersion = JSON.parse(fileStore.get(VAULT_PATH));
-  unknownVersion.formatVersion = 3;
+  unknownVersion.formatVersion = 4;
   restoreVault(JSON.stringify(unknownVersion, null, 2));
   plugin.lock();
   restart();
