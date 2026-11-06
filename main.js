@@ -66,6 +66,24 @@ const I18N = {
     note_default_title: '我的密钥',
     note_ref_missing: '引用缺失: {name}',
     note_ref_copy: '复制引用 {name}',
+    note_ref_self: '（不能引用自身）',
+    note_editor_ref_hint: '引用缺失: {missing}。请对照下方「可用条目名」核对拼写。',
+    note_ref_names: '可用条目名: {names}',
+    note_ref_names_more: '可用条目名: 共 {count} 个',
+    btn_ref_names_expand: '展开查看',
+    btn_ref_names_collapse: '收起',
+    note_ref_create_confirm: '该条目不存在，是否创建同名条目「{name}」？',
+    btn_create_entry: '创建条目',
+    note_ref_create_title: '点击创建同名条目',
+    note_no_entries: '（暂无条目）',
+    btn_note_sample: '插入示例表格',
+    note_sample_choice: '当前笔记已有内容：要追加到末尾，还是替换全文？',
+    btn_sample_append: '追加到末尾',
+    btn_sample_replace: '替换全文',
+    note_guide_title: '从这里开始写账号表',
+    note_guide_desc: '笔记模式会像 Markdown 笔记一样渲染表格、链接与引用。点「插入示例表格」会把三列示例写进编辑器，不会自动保存。',
+    notice_notes_mode_hint: '这里是笔记模式：可以像写 Markdown 一样维护账号表，保存后表格会渲染出来。',
+    notice_note_content_hint: '这段看起来是笔记内容，笔记模式里会渲染成表格。',
     note_empty: '这篇笔记还没有内容，点击「编辑笔记」开始写 Markdown。',
     note_editor_hint: '支持 Markdown：标题、列表、粗体、行内代码、管道表格、链接（仅 http/https）与 {{条目名.密码}} 引用。',
     err_note_missing: '笔记不存在或已被移除。',
@@ -191,6 +209,24 @@ const I18N = {
     note_default_title: 'My secrets',
     note_ref_missing: 'Missing reference: {name}',
     note_ref_copy: 'Copy reference {name}',
+    note_ref_self: ' (self-reference is not allowed)',
+    note_editor_ref_hint: 'Missing reference: {missing}. Check spelling against "Available entries" below.',
+    note_ref_names: 'Available entries: {names}',
+    note_ref_names_more: 'Available entries: {count} total',
+    btn_ref_names_expand: 'Show all',
+    btn_ref_names_collapse: 'Collapse',
+    note_ref_create_confirm: 'This entry does not exist. Create an entry named "{name}"?',
+    btn_create_entry: 'Create entry',
+    note_ref_create_title: 'Click to create this entry',
+    note_no_entries: '(no entries)',
+    btn_note_sample: 'Insert sample table',
+    note_sample_choice: 'This note already has content: append to the end, or replace everything?',
+    btn_sample_append: 'Append',
+    btn_sample_replace: 'Replace all',
+    note_guide_title: 'Start your account table here',
+    note_guide_desc: 'Notes mode renders tables, links and references like a Markdown note. "Insert sample table" writes a three-column example into the editor and does not save automatically.',
+    notice_notes_mode_hint: 'This is notes mode: maintain an account table like a Markdown note; tables render after saving.',
+    notice_note_content_hint: 'This looks like note content; notes mode will render it as a table.',
     note_empty: 'This note is empty. Click "Edit note" to start writing Markdown.',
     note_editor_hint: 'Markdown support: headings, lists, bold, inline code, pipe tables, links (http/https only) and {{entry.password}} references.',
     err_note_missing: 'The note does not exist or has been removed.',
@@ -463,6 +499,25 @@ function decodePayload(data) {
   return null;
 }
 
+// 判断一段条目内容是否更像“笔记”：管道表格或 {{引用}}
+function looksLikeMarkdownNote(content) {
+  const text = String(content == null ? '' : content).replace(/\r\n?/g, '\n');
+  if (/\{\{[^{}\n]+\}\}/.test(text)) return true;
+  const lines = text.split('\n');
+  for (let i = 0; i + 1 < lines.length; i += 1) {
+    const header = lines[i].trim();
+    const separator = lines[i + 1].trim();
+    if (!header || !separator || header.indexOf('|') < 0 || separator.indexOf('|') < 0) continue;
+    const cells = separator
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim());
+    if (cells.length && cells.every((cell) => /^:?-{3,}:?$/.test(cell))) return true;
+  }
+  return false;
+}
+
 /* ------------------------------------------------------------------ */
 /* 设置页（1.13 声明式 Path A：仅 getSettingDefinitions，无 display）      */
 /* ------------------------------------------------------------------ */
@@ -590,6 +645,8 @@ class SecretVaultView extends ItemView {
     this.noteId = '';
     this.noteEditing = false;
     this.noteDraft = null;
+    this.noteEmptyHintShown = false;
+    this.pendingRefCreate = null;
   }
 
   getViewType() {
@@ -636,6 +693,7 @@ class SecretVaultView extends ItemView {
     // 笔记编辑草稿与渲染区一并丢弃，避免锁屏后仍能从视图或闭包里拿到明文
     this.noteEditing = false;
     this.noteDraft = null;
+    this.pendingRefCreate = null;
     if (this.contentEl) this.contentEl.empty();
   }
 
@@ -648,6 +706,7 @@ class SecretVaultView extends ItemView {
     // 挂起时同样丢弃笔记草稿，避免遮罩后仍残留明文副本
     this.noteEditing = false;
     this.noteDraft = null;
+    this.pendingRefCreate = null;
     if (this.contentEl) this.contentEl.empty();
     this.render();
   }
@@ -895,7 +954,7 @@ class SecretVaultView extends ItemView {
     // 顶部模式切换：表格 / 笔记
     const modeTabs = root.createDiv({ cls: 'xsv-mode-tabs' });
     const tableTab = modeTabs.createEl('button', {
-      cls: 'xsv-mode-tab' + (this.mode === 'table' ? ' xsv-mode-tab-active' : ''),
+      cls: 'xsv-mode-tab xsv-mode-tab-table' + (this.mode === 'table' ? ' xsv-mode-tab-active' : ''),
       text: this.plugin.t('btn_mode_table'),
     });
     tableTab.addEventListener('click', () => {
@@ -903,15 +962,25 @@ class SecretVaultView extends ItemView {
       this.mode = 'table';
       this.noteEditing = false;
       this.noteDraft = null;
+      this.pendingRefCreate = null;
       this.render();
     });
     const notesTab = modeTabs.createEl('button', {
-      cls: 'xsv-mode-tab' + (this.mode === 'notes' ? ' xsv-mode-tab-active' : ''),
+      cls: 'xsv-mode-tab xsv-mode-tab-notes' + (this.mode === 'notes' ? ' xsv-mode-tab-active' : ''),
       text: this.plugin.t('btn_mode_notes'),
     });
     notesTab.addEventListener('click', () => {
       if (this.mode === 'notes') return;
       this.mode = 'notes';
+      this.pendingRefCreate = null;
+      // 第一次切到空的笔记模式时给一次提示，避免用户以为入口失效
+      if (!this.noteEmptyHintShown) {
+        const selected = (this.plugin.notes || []).filter((note) => note.id === this.noteId)[0] || (this.plugin.notes || [])[0];
+        if (!selected || !String(selected.body || '').trim()) {
+          this.noteEmptyHintShown = true;
+          new Notice(this.plugin.t('notice_notes_mode_hint'), 6000);
+        }
+      }
       this.render();
     });
 
@@ -1001,7 +1070,9 @@ class SecretVaultView extends ItemView {
     const revealed = this.revealed.has(entry.id);
     const contentWrap = row.createDiv({ cls: 'xsv-content-wrap' });
     if (revealed) {
-      const contentEl = contentWrap.createDiv({ cls: 'xsv-content xsv-no-drag', text: entry.content || '' });
+      // 条目内容也走同一渲染器：表格、链接、引用掩码都生效；排除自引用避免递归
+      const contentEl = contentWrap.createDiv({ cls: 'xsv-content xsv-no-drag' });
+      this.renderMarkdown(contentEl, entry.content || '', { excludeName: entry.name });
       contentEl.addEventListener('dragstart', (event) => {
         if (event && typeof event.preventDefault === 'function') event.preventDefault();
       });
@@ -1071,6 +1142,7 @@ class SecretVaultView extends ItemView {
         this.noteId = note.id;
         this.noteEditing = false;
         this.noteDraft = null;
+        this.pendingRefCreate = null;
         this.render();
       });
     }
@@ -1089,28 +1161,183 @@ class SecretVaultView extends ItemView {
       });
     }
 
+    // 点击「引用缺失」后的确认条：只提示，不自动创建
+    if (this.pendingRefCreate && !readOnly) {
+      const pending = this.pendingRefCreate;
+      const confirm = wrap.createDiv({ cls: 'xsv-ref-create-confirm' });
+      confirm.createDiv({
+        cls: 'xsv-desc',
+        text: this.plugin.t('note_ref_create_confirm', { name: pending.name }),
+      });
+      const confirmActions = confirm.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+      const createButton = confirmActions.createEl('button', {
+        cls: 'xsv-btn xsv-btn-primary',
+        text: this.plugin.t('btn_create_entry'),
+      });
+      createButton.addEventListener('click', () => {
+        this.pendingRefCreate = null;
+        this.noteEditing = false;
+        this.noteDraft = null;
+        this.render();
+        new SecretEntryModal(this.app, this.plugin, null, { name: pending.name, type: 'password' }).open();
+      });
+      const cancelButton = confirmActions.createEl('button', {
+        cls: 'xsv-btn',
+        text: this.plugin.t('btn_cancel'),
+      });
+      cancelButton.addEventListener('click', () => {
+        this.pendingRefCreate = null;
+        this.render();
+      });
+    }
+
     const body = wrap.createDiv({ cls: 'xsv-note-body' });
     if (this.noteEditing) {
       this.renderNoteEditor(body, selected);
       return;
     }
     if (!String(selected.body || '').trim()) {
-      body.createDiv({ cls: 'xsv-empty', text: this.plugin.t('note_empty') });
+      const guide = body.createDiv({ cls: 'xsv-note-guide' });
+      guide.createDiv({ cls: 'xsv-note-guide-title', text: this.plugin.t('note_guide_title') });
+      guide.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_guide_desc') });
+      if (!readOnly) {
+        const sampleButton = guide.createEl('button', {
+          cls: 'xsv-btn xsv-btn-primary',
+          text: this.plugin.t('btn_note_sample'),
+        });
+        sampleButton.addEventListener('click', () => {
+          this.noteEditing = true;
+          this.noteDraft = this.buildSampleNote();
+          this.render();
+        });
+      }
       return;
     }
-    this.renderMarkdown(body, selected.body);
+    this.renderMarkdown(body, selected.body, { allowCreateRefs: !readOnly });
+  }
+
+  // 示例表：优先用现有条目的真实名称，避免引用名称对不上
+  buildSampleNote() {
+    const names = (this.plugin.entries || []).slice(0, 2).map((entry) => entry.name);
+    const first = names[0] || 'GitHub';
+    const second = names[1] || '阿里云';
+    return [
+      '# 我的密钥',
+      '',
+      '## 常用账号',
+      '',
+      '| 名称 | 账号 | 密码 |',
+      '| :--- | :--- | :--- |',
+      '| ' + first + ' | {{' + first + '.账号}} | {{' + first + '.密码}} |',
+      '| ' + second + ' | {{' + second + '.账号}} | {{' + second + '.密码}} |',
+    ].join('\n');
   }
 
   renderNoteEditor(body, note) {
     body.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_editor_hint') });
     const editor = body.createEl('textarea', { cls: 'xsv-note-editor' });
     editor.value = this.noteDraft != null ? this.noteDraft : note.body;
+    // 引用缺失提示：只列出缺了哪些名字，不显示任何值
+    const refHint = body.createDiv({ cls: 'xsv-ref-missing-hint' });
+    const updateRefHint = () => {
+      const missing = this.collectMissingReferences(editor.value);
+      if (!missing.length) {
+        refHint.setText('');
+        if (refHint.style) refHint.style.display = 'none';
+        return;
+      }
+      if (refHint.style) refHint.style.display = '';
+      refHint.setText(this.plugin.t('note_editor_ref_hint', { missing: missing.join('、') }));
+    };
+    updateRefHint();
+
+    // 可用条目名（仅名称，不含值）；超过 8 个时折叠为「共 N 个，展开查看」
+    const namesBar = body.createDiv({ cls: 'xsv-ref-names' });
+    let namesExpanded = false;
+    const renderNames = () => {
+      namesBar.empty();
+      const names = (this.plugin.entries || []).map((item) => item.name);
+      if (!names.length) {
+        namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_no_entries') });
+        return;
+      }
+      if (names.length <= 8) {
+        namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_ref_names', { names: names.join('、') }) });
+        return;
+      }
+      if (!namesExpanded) {
+        namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_ref_names_more', { count: names.length }) });
+        const expandButton = namesBar.createEl('button', {
+          cls: 'xsv-btn xsv-btn-small',
+          text: this.plugin.t('btn_ref_names_expand'),
+        });
+        expandButton.addEventListener('click', () => {
+          namesExpanded = true;
+          renderNames();
+        });
+        return;
+      }
+      namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_ref_names', { names: names.join('、') }) });
+      const collapseButton = namesBar.createEl('button', {
+        cls: 'xsv-btn xsv-btn-small',
+        text: this.plugin.t('btn_ref_names_collapse'),
+      });
+      collapseButton.addEventListener('click', () => {
+        namesExpanded = false;
+        renderNames();
+      });
+    };
+    renderNames();
+
     editor.addEventListener('input', () => {
       this.noteDraft = editor.value;
+      updateRefHint();
     });
     const errorEl = body.createDiv({ cls: 'xsv-error' });
     errorEl.setText('');
+
+    // 已有内容时不静默插入：先让用户选择追加还是替换
+    const sampleChoice = body.createDiv({ cls: 'xsv-sample-choice' });
+    if (sampleChoice.style) sampleChoice.style.display = 'none';
+    sampleChoice.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_sample_choice') });
+    const sampleActions = sampleChoice.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    const applySample = (mode) => {
+      const sample = this.buildSampleNote();
+      editor.value = mode === 'replace' ? sample : String(editor.value).replace(/\s+$/, '') + '\n\n' + sample;
+      this.noteDraft = editor.value;
+      updateRefHint();
+      if (sampleChoice.style) sampleChoice.style.display = 'none';
+    };
+    const appendButton = sampleActions.createEl('button', {
+      cls: 'xsv-btn xsv-btn-small',
+      text: this.plugin.t('btn_sample_append'),
+    });
+    appendButton.addEventListener('click', () => applySample('append'));
+    const replaceButton = sampleActions.createEl('button', {
+      cls: 'xsv-btn xsv-btn-small',
+      text: this.plugin.t('btn_sample_replace'),
+    });
+    replaceButton.addEventListener('click', () => applySample('replace'));
+    const sampleCancelButton = sampleActions.createEl('button', {
+      cls: 'xsv-btn xsv-btn-small',
+      text: this.plugin.t('btn_cancel'),
+    });
+    sampleCancelButton.addEventListener('click', () => {
+      if (sampleChoice.style) sampleChoice.style.display = 'none';
+    });
+
     const actions = body.createDiv({ cls: 'xsv-actions xsv-actions-start' });
+    const sampleButton = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_note_sample') });
+    sampleButton.addEventListener('click', () => {
+      const sample = this.buildSampleNote();
+      if (!String(editor.value).trim()) {
+        editor.value = sample;
+        this.noteDraft = sample;
+        updateRefHint();
+        return;
+      }
+      if (sampleChoice.style) sampleChoice.style.display = '';
+    });
     const cancelButton = actions.createEl('button', { cls: 'xsv-btn', text: this.plugin.t('btn_note_cancel') });
     cancelButton.addEventListener('click', () => {
       this.noteEditing = false;
@@ -1144,14 +1371,14 @@ class SecretVaultView extends ItemView {
   }
 
   // 简易 Markdown 渲染：全部用 DOM API 构建，从不拼接 HTML 字符串
-  renderMarkdown(container, source) {
+  renderMarkdown(container, source, ctx) {
     const lines = String(source || '').replace(/\r\n?/g, '\n').split('\n');
     let index = 0;
     const paragraph = [];
     const flushParagraph = () => {
       if (!paragraph.length) return;
       const p = container.createEl('p');
-      this.renderInline(p, paragraph.join(' '));
+      this.renderInline(p, paragraph.join(' '), ctx);
       paragraph.length = 0;
     };
 
@@ -1167,7 +1394,7 @@ class SecretVaultView extends ItemView {
         flushParagraph();
         const level = heading[1].length;
         const headingEl = container.createEl('h' + level);
-        this.renderInline(headingEl, heading[2].trim());
+        this.renderInline(headingEl, heading[2].trim(), ctx);
         index += 1;
         continue;
       }
@@ -1178,7 +1405,7 @@ class SecretVaultView extends ItemView {
           const item = /^\s*[-*]\s+(.*)$/.exec(lines[index]);
           if (!item) break;
           const li = ul.createEl('li');
-          this.renderInline(li, item[1]);
+          this.renderInline(li, item[1], ctx);
           index += 1;
         }
         continue;
@@ -1190,14 +1417,14 @@ class SecretVaultView extends ItemView {
           const item = /^\s*\d+\.\s+(.*)$/.exec(lines[index]);
           if (!item) break;
           const li = ol.createEl('li');
-          this.renderInline(li, item[1]);
+          this.renderInline(li, item[1], ctx);
           index += 1;
         }
         continue;
       }
       if (this.isPipeTableStart(lines, index)) {
         flushParagraph();
-        index = this.renderPipeTable(container, lines, index);
+        index = this.renderPipeTable(container, lines, index, ctx);
         continue;
       }
       paragraph.push(line.trim());
@@ -1222,7 +1449,7 @@ class SecretVaultView extends ItemView {
     return separator.every((cell) => /^:?-{3,}:?$/.test(cell));
   }
 
-  renderPipeTable(container, lines, start) {
+  renderPipeTable(container, lines, start, ctx) {
     const headerCells = this.splitPipeRow(lines[start]);
     const separatorCells = this.splitPipeRow(lines[start + 1]);
     const alignments = separatorCells.map((cell) => {
@@ -1238,7 +1465,7 @@ class SecretVaultView extends ItemView {
     for (let col = 0; col < headerCells.length; col += 1) {
       const th = headRow.createEl('th');
       if (alignments[col] && th.style) th.style.textAlign = alignments[col];
-      this.renderInline(th, headerCells[col]);
+      this.renderInline(th, headerCells[col], ctx);
     }
     const tbody = table.createEl('tbody');
     let index = start + 2;
@@ -1248,7 +1475,7 @@ class SecretVaultView extends ItemView {
       for (let col = 0; col < headerCells.length; col += 1) {
         const td = tr.createEl('td');
         if (alignments[col] && td.style) td.style.textAlign = alignments[col];
-        this.renderInline(td, cells[col] || '');
+        this.renderInline(td, cells[col] || '', ctx);
       }
       index += 1;
     }
@@ -1261,7 +1488,7 @@ class SecretVaultView extends ItemView {
     else parent.createSpan({ text: String(text) });
   }
 
-  renderInline(parent, text) {
+  renderInline(parent, text, ctx) {
     let rest = String(text == null ? '' : text);
     const tokenRe = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|\{\{[^{}]+\}\})/;
     while (rest) {
@@ -1273,11 +1500,11 @@ class SecretVaultView extends ItemView {
       if (match.index > 0) this.appendInlineText(parent, rest.slice(0, match.index));
       const token = match[0];
       rest = rest.slice(match.index + token.length);
-      this.renderInlineToken(parent, token);
+      this.renderInlineToken(parent, token, ctx);
     }
   }
 
-  renderInlineToken(parent, token) {
+  renderInlineToken(parent, token, ctx) {
     if (token.startsWith('**') && token.endsWith('**')) {
       const strong = parent.createEl('strong');
       this.appendInlineText(strong, token.slice(2, -2));
@@ -1309,11 +1536,35 @@ class SecretVaultView extends ItemView {
     }
     const ref = /^\{\{([^{}]+)\}\}$/.exec(token);
     if (ref) {
-      const resolved = this.resolveReference(ref[1]);
-      if (!resolved) {
+      const resolved = this.resolveReference(ref[1], ctx && ctx.excludeName);
+      if (resolved && resolved.self) {
         parent.createSpan({
           cls: 'xsv-ref-missing',
-          text: this.plugin.t('note_ref_missing', { name: ref[1].trim() }),
+          text: this.plugin.t('note_ref_missing', { name: resolved.name }),
+        });
+        parent.createSpan({ cls: 'xsv-ref-selfnote', text: this.plugin.t('note_ref_self') });
+        return;
+      }
+      if (!resolved) {
+        const raw = ref[1].trim();
+        if (ctx && ctx.allowCreateRefs) {
+          const dot = raw.lastIndexOf('.');
+          const field = dot > 0 ? raw.slice(dot + 1) : '';
+          const base = field === '密码' || field === '账号' ? raw.slice(0, dot) : raw;
+          const missingButton = parent.createEl('button', {
+            cls: 'xsv-ref-missing xsv-ref-missing-action',
+            text: this.plugin.t('note_ref_missing', { name: raw }),
+          });
+          missingButton.setAttribute('title', this.plugin.t('note_ref_create_title'));
+          missingButton.addEventListener('click', () => {
+            this.pendingRefCreate = { name: base, field };
+            this.render();
+          });
+          return;
+        }
+        parent.createSpan({
+          cls: 'xsv-ref-missing',
+          text: this.plugin.t('note_ref_missing', { name: raw }),
         });
         return;
       }
@@ -1328,11 +1579,23 @@ class SecretVaultView extends ItemView {
     this.appendInlineText(parent, token);
   }
 
-  resolveReference(expression) {
+  collectMissingReferences(source) {
+    const tokens = String(source == null ? '' : source).match(/\{\{[^{}\n]+\}\}/g) || [];
+    const missing = [];
+    for (const token of tokens) {
+      const name = token.slice(2, -2).trim();
+      if (!name) continue;
+      if (!this.resolveReference(name) && missing.indexOf(name) < 0) missing.push(name);
+    }
+    return missing;
+  }
+
+  resolveReference(expression, excludeName) {
     const cleaned = String(expression == null ? '' : expression).trim();
     if (!cleaned) return null;
     // 先按完整名称匹配（条目名本身可能含点号）
     const exact = this.plugin.entries.filter((entry) => entry.name === cleaned)[0];
+    if (exact && excludeName && exact.name === excludeName) return { name: exact.name, self: true };
     if (exact && exact.content) return { name: exact.name, field: '密码', value: exact.content };
     const dot = cleaned.lastIndexOf('.');
     if (dot > 0) {
@@ -1340,6 +1603,7 @@ class SecretVaultView extends ItemView {
       if (field === '密码' || field === '账号') {
         const name = cleaned.slice(0, dot);
         const entry = this.plugin.entries.filter((item) => item.name === name)[0];
+        if (entry && excludeName && entry.name === excludeName) return { name: entry.name, self: true };
         if (entry) {
           const value = field === '账号' ? entry.name : entry.content;
           if (value) return { name: entry.name, field, value };
@@ -1375,10 +1639,11 @@ class SecretVaultView extends ItemView {
 /* 新增 / 编辑弹窗                                                      */
 /* ------------------------------------------------------------------ */
 class SecretEntryModal extends Modal {
-  constructor(app, plugin, entry) {
+  constructor(app, plugin, entry, prefill) {
     super(app);
     this.plugin = plugin;
     this.entry = entry || null;
+    this.prefill = !entry && prefill ? prefill : null;
     this.draftContent = entry ? entry.content : '';
     this.contentRevealed = !entry;
   }
@@ -1414,7 +1679,7 @@ class SecretEntryModal extends Modal {
 
     const nameWrap = field(t('field_name'));
     const nameInput = nameWrap.createEl('input', { type: 'text', cls: 'xsv-input' });
-    nameInput.value = entry ? entry.name : '';
+    nameInput.value = entry ? entry.name : this.prefill ? this.prefill.name : '';
     harden(nameInput);
     bindActivity(nameInput);
 
@@ -1424,7 +1689,7 @@ class SecretEntryModal extends Modal {
       const option = typeSelect.createEl('option', { text: plugin.typeLabel(type) });
       option.value = type;
     }
-    typeSelect.value = entry ? entry.type : 'password';
+    typeSelect.value = entry ? entry.type : this.prefill && this.prefill.type ? this.prefill.type : 'password';
     bindActivity(typeSelect);
 
     const tagsWrap = field(t('field_tags'));
@@ -1516,6 +1781,7 @@ class SecretEntryModal extends Modal {
             return;
           }
           new Notice(t(result === 'unchanged' ? 'notice_unchanged' : 'notice_saved'), 3000);
+          if (result !== 'unchanged') plugin.maybeHintNoteContent(payload.content);
         } else {
           const created = await plugin.addEntry(payload);
           if (!created) {
@@ -1523,6 +1789,7 @@ class SecretEntryModal extends Modal {
             return;
           }
           new Notice(t('notice_saved'), 3000);
+          plugin.maybeHintNoteContent(payload.content);
         }
         this.close();
       } catch (error) {
@@ -1542,6 +1809,7 @@ class SecretEntryModal extends Modal {
     this.contentEl.empty();
     this.draftContent = '';
     this.contentRevealed = false;
+    this.prefill = null;
     // 不保留明文条目对象引用
     this.entry = null;
   }
@@ -1635,6 +1903,7 @@ class XUSecretVault extends Plugin {
   vaultSources = [];
   selectedVaultPath = '';
   v1UpgradeWarned = false;
+  markdownHintShown = false;
 
   // 统一单调时钟：退避、空闲与后台计时都不受系统时间跳变影响
   nowMs() {
@@ -2701,6 +2970,15 @@ class XUSecretVault extends Plugin {
     });
     if (result.unchanged) return 'unchanged';
     if (!result.written) return false;
+    return true;
+  }
+
+  // 条目内容疑似笔记时，保存成功后提示一次（同一插件会话只弹一次）
+  maybeHintNoteContent(content) {
+    if (this.markdownHintShown) return false;
+    if (!looksLikeMarkdownNote(content)) return false;
+    this.markdownHintShown = true;
+    new Notice(this.t('notice_note_content_hint'), 6000);
     return true;
   }
 

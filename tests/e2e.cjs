@@ -498,7 +498,7 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.2.0',
+    version: '0.2.1',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
@@ -1497,7 +1497,193 @@ try {
   fileStore.delete(readOnlyCopy);
   ok(plugin.isReadOnlyCopy() === false && plugin.selectedVaultPath === '', '锁定后只读态复位');
 
-  // 21) crypto.subtle 不可用时明确报错
+  // 21) 0.2.1 可用性增强
+  ok((await plugin.unlock(MASTER)) === true, '解锁以测试 0.2.1');
+  await plugin.saveNote('note-primary', '');
+  view.mode = 'table';
+  view.noteEmptyHintShown = false;
+  view.render();
+  const tableTab = findButton(view.contentEl, '表格');
+  const notesTab = findButton(view.contentEl, '笔记');
+  ok(!!tableTab && tableTab.hasClass('xsv-mode-tab-table'), '表格切换按钮带独立图标类');
+  ok(!!notesTab && notesTab.hasClass('xsv-mode-tab-notes'), '笔记切换按钮带独立图标类');
+  ok(tableTab.hasClass('xsv-mode-tab-active') && !notesTab.hasClass('xsv-mode-tab-active'), '当前模式选中态正确');
+  notices.length = 0;
+  notesTab.click();
+  ok(view.mode === 'notes', '点击笔记进入笔记模式');
+  const notesTabAfter = findButton(view.contentEl, '笔记');
+  const tableTabAfter = findButton(view.contentEl, '表格');
+  ok(
+    notesTabAfter.hasClass('xsv-mode-tab-active') && !tableTabAfter.hasClass('xsv-mode-tab-active'),
+    '笔记模式选中态强化'
+  );
+  ok(notices.some((message) => message.indexOf('这里是笔记模式') >= 0), '首次切到空笔记模式给一次性提示');
+  findButton(view.contentEl, '表格').click();
+  findButton(view.contentEl, '笔记').click();
+  ok(
+    notices.filter((message) => message.indexOf('这里是笔记模式') >= 0).length === 1,
+    '一次性提示不重复'
+  );
+
+  // 21a) 空态引导 + 示例表格按钮（不自动保存）
+  const guide = findAll(view.contentEl, (el) => el.hasClass('xsv-note-guide'))[0];
+  ok(!!guide, '空笔记显示引导块');
+  ok(textOf(guide).indexOf('从这里开始写账号表') >= 0, '引导块说明可见');
+  const sampleButton = findButton(view.contentEl, '插入示例表格');
+  ok(!!sampleButton, '空态提供插入示例表格按钮');
+  sampleButton.click();
+  ok(view.noteEditing === true, '点击示例后进入编辑态');
+  const sampleEditor = findAll(view.contentEl, (el) => el.tagName === 'TEXTAREA')[0];
+  const sampleNames = plugin.entries.slice(0, 2).map((entry) => entry.name);
+  ok(sampleEditor.value.indexOf('| 名称 | 账号 | 密码 |') >= 0, '示例包含三列表头');
+  ok(
+    sampleEditor.value.indexOf('{{' + sampleNames[0] + '.账号}}') >= 0 &&
+      sampleEditor.value.indexOf('{{' + sampleNames[0] + '.密码}}') >= 0,
+    '示例使用当前真实条目名生成引用'
+  );
+  ok(plugin.notes[0].body === '', '负向：示例插入不自动保存');
+  findButton(view.contentEl, '保存笔记').click();
+  await waitFor(() => plugin.notes[0].body.indexOf('| 名称 | 账号 | 密码 |') >= 0, '保存示例笔记');
+
+  // 21b) 条目内容按 Markdown 渲染；自引用降级为引用缺失
+  const apiKeyEntry = plugin.entries.filter((entry) => entry.name === 'API Key')[0];
+  ok(!!apiKeyEntry, '找到用于条目渲染的 API Key');
+  await plugin.updateEntry(apiKeyEntry.id, {
+    name: 'API Key',
+    type: 'api-key',
+    tags: [],
+    content: '| 字段 | 值 |\n| --- | --- |\n| 自引用 | {{API Key.密码}} |\n| 其它 | {{GitHub.密码}} |',
+    note: '',
+  });
+  view.mode = 'table';
+  view.revealed.add(apiKeyEntry.id);
+  view.render();
+  const entryContent = findAll(view.contentEl, (el) => el.hasClass('xsv-content'))[0];
+  ok(!!entryContent, '显示的条目内容区存在');
+  const entryTable = findAll(entryContent, (el) => el.tagName === 'TABLE')[0];
+  ok(!!entryTable && entryTable.hasClass('xsv-md-table'), '条目内容中的管道表格渲染为真实 table');
+  const selfMissing = findAll(entryContent, (el) => el.hasClass('xsv-ref-missing'));
+  ok(selfMissing.length === 1 && textOf(selfMissing[0]).indexOf('API Key') >= 0, '负向：自引用降级为引用缺失');
+  const selfNote = findAll(entryContent, (el) => el.hasClass('xsv-ref-selfnote'))[0];
+  ok(!!selfNote && textOf(selfNote).indexOf('不能引用自身') >= 0, '自引用给出灰色说明');
+  const entryRefButtons = findAll(entryContent, (el) => el.hasClass('xsv-ref'));
+  ok(
+    !entryRefButtons.some((el) => String(el.textContent).indexOf('API Key') >= 0),
+    '负向：自引用不生成可复制按钮'
+  );
+  ok(entryRefButtons.length === 1, '条目内容中的跨条目引用生成一个按钮');
+  const crossRef = entryRefButtons[0];
+  ok(!!crossRef && String(crossRef.textContent).indexOf('GitHub') >= 0, '条目内容可引用其它条目并掩码显示');
+  ok(String(textOf(entryContent)).indexOf(SECRET_TWO) < 0, '负向：条目引用值不进入 DOM 文本');
+  view.revealed.clear();
+
+  // 21c) 引用缺失可点击创建条目：取消路径 + 确认路径
+  await plugin.saveNote('note-primary', '{{Nope.密码}}');
+  view.mode = 'notes';
+  view.render();
+  const missingAction = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-missing-action'))[0];
+  ok(!!missingAction && missingAction.tagName === 'BUTTON', '引用缺失渲染为可点击元素');
+  const entryCountBefore = plugin.entries.length;
+  missingAction.click();
+  const confirmBar = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-create-confirm'))[0];
+  ok(!!confirmBar, '点击后出现创建确认条');
+  ok(textOf(confirmBar).indexOf('是否创建同名条目') >= 0 && textOf(confirmBar).indexOf('Nope') >= 0, '确认文案包含条目名');
+  ok(plugin.entries.length === entryCountBefore, '负向：确认前不自动创建条目');
+  findButton(confirmBar, '取消').click();
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-ref-create-confirm')).length, '取消后确认条消失');
+  ok(plugin.entries.length === entryCountBefore, '负向：取消后不创建条目');
+
+  findAll(view.contentEl, (el) => el.hasClass('xsv-ref-missing-action'))[0].click();
+  findButton(view.contentEl, '创建条目').click();
+  const openedModals = Array.from(plugin.openModals);
+  const refCreateModal = openedModals[openedModals.length - 1];
+  ok(!!refCreateModal, '确认后打开现有新增条目表单');
+  const refModalInputs = findAll(refCreateModal.contentEl, (el) => el.tagName === 'INPUT');
+  const refModalSelects = findAll(refCreateModal.contentEl, (el) => el.tagName === 'SELECT');
+  ok(refModalInputs[0] && refModalInputs[0].value === 'Nope', '新增表单预填条目名（去掉 .密码 字段）');
+  ok(refModalSelects[0] && refModalSelects[0].value === 'password', '新增表单按字段预填密码类型');
+  refCreateModal.close();
+  ok(plugin.entries.length === entryCountBefore, '负向：只打开表单，不静默写入');
+
+  // 21d) 示例插入不重复：已有内容先选择追加/替换
+  await plugin.saveNote('note-primary', '已有内容-EXISTING');
+  view.render();
+  findButton(view.contentEl, '编辑笔记').click();
+  const dupEditor = findAll(view.contentEl, (el) => el.tagName === 'TEXTAREA')[0];
+  findButton(view.contentEl, '插入示例表格').click();
+  const choice = findAll(view.contentEl, (el) => el.hasClass('xsv-sample-choice'))[0];
+  ok(!!choice && choice.style.display !== 'none', '已有内容时先显示追加/替换选择');
+  ok(dupEditor.value.indexOf('| 名称 | 账号 | 密码 |') < 0, '负向：未选择前不插入示例');
+  ok(plugin.notes[0].body === '已有内容-EXISTING', '负向：未选择前不改内存笔记');
+  findButton(view.contentEl, '追加到末尾').click();
+  const headerCount = (dupEditor.value.match(/\| 名称 \| 账号 \| 密码 \|/g) || []).length;
+  ok(headerCount === 1, '追加后示例只出现一次');
+  ok(dupEditor.value.indexOf('已有内容-EXISTING') === 0, '追加保留原有内容');
+  ok(choice.style.display === 'none', '选择后隐藏选择条');
+  findButton(view.contentEl, '插入示例表格').click();
+  ok(choice.style.display !== 'none', '再次点击示例重新出现选择');
+  const headerCount2 = (dupEditor.value.match(/\| 名称 \| 账号 \| 密码 \|/g) || []).length;
+  ok(headerCount2 === 1, '负向：第二次点击本身不造成重复');
+  findButton(choice, '取消').click();
+  ok(choice.style.display === 'none', '取消追加后保留原有内容');
+  ok((dupEditor.value.match(/\| 名称 \| 账号 \| 密码 \|/g) || []).length === 1, '取消后仍只有一份示例');
+  findButton(view.contentEl, '插入示例表格').click();
+  findButton(view.contentEl, '替换全文').click();
+  ok(dupEditor.value.indexOf('已有内容-EXISTING') < 0, '替换全文移除原内容');
+  ok((dupEditor.value.match(/\| 名称 \| 账号 \| 密码 \|/g) || []).length === 1, '替换后只有一份示例');
+
+  // 21e) 编辑态列出可用条目名（仅名称，不含值），过长折叠
+  const namesBar = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-names'))[0];
+  ok(!!namesBar, '编辑态显示可用条目名提示条');
+  const namesText = textOf(namesBar);
+  ok(namesText.indexOf('GitHub') >= 0 && namesText.indexOf('API Key') >= 0, '提示条列出当前条目名');
+  ok(namesText.indexOf(SECRET_ONE) < 0 && namesText.indexOf(SECRET_TWO) < 0, '负向：提示条不显示任何值');
+  const originalEntries = plugin.entries;
+  plugin.entries = originalEntries.concat(
+    Array.from({ length: 7 }, (unused, index) => ({
+      id: 'tmp-' + index,
+      name: 'TMP-' + index,
+      type: 'password',
+      content: 'x',
+      tags: [],
+      note: '',
+    }))
+  );
+  view.render();
+  const collapsedBar = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-names'))[0];
+  ok(textOf(collapsedBar).indexOf('共 10 个') >= 0, '条目名过多时折叠为数量');
+  ok(!textOf(collapsedBar).includes('TMP-0'), '负向：折叠时不展开全部名称');
+  findButton(collapsedBar, '展开查看').click();
+  const expandedBar = findAll(view.contentEl, (el) => el.hasClass('xsv-ref-names'))[0];
+  ok(textOf(expandedBar).indexOf('TMP-0') >= 0, '展开后显示全部条目名');
+  plugin.entries = originalEntries;
+  view.render();
+  findButton(view.contentEl, '取消编辑').click();
+
+  // 21f) 条目保存后的笔记提示只弹一次
+  notices.length = 0;
+  plugin.markdownHintShown = false;
+  ok(plugin.maybeHintNoteContent('普通密码 abc123') === false, '负向：普通内容不触发笔记提示');
+  ok(plugin.maybeHintNoteContent('| a | b |\n| --- | --- |\n| 1 | 2 |') === true, '管道表格内容触发提示');
+  ok(notices.some((message) => message.indexOf('笔记模式') >= 0), '提示文案指向笔记模式');
+  ok(plugin.maybeHintNoteContent('{{GitHub.密码}}') === false, '负向：同一会话不重复提示');
+  ok(notices.filter((message) => message.indexOf('笔记模式') >= 0).length === 1, '提示只弹一次');
+  plugin.markdownHintShown = false;
+  ok(plugin.maybeHintNoteContent('{{GitHub.密码}}') === true, '引用内容同样触发提示');
+
+  // 21g) 锁定后新增的引用/示例状态一并清空
+  view.mode = 'notes';
+  view.noteEditing = true;
+  view.noteDraft = '示例草稿-DRAFT-MARKER';
+  view.pendingRefCreate = { name: 'Nope', field: '密码' };
+  view.render();
+  plugin.lock();
+  ok(view.noteEditing === false && view.noteDraft === null, '锁定后草稿被丢弃（0.2.1）');
+  ok(view.pendingRefCreate === null, '锁定后待创建引用状态被清空');
+  ok(String(textOf(view.contentEl)).indexOf('DRAFT-MARKER') < 0, '锁定后不残留示例草稿');
+  ok(!findAll(view.contentEl, (el) => el.hasClass('xsv-sample-choice')).length, '锁定后追加/替换选择条被移除');
+
+  // 22) crypto.subtle 不可用时明确报错
   plugin.lock();
   const savedCrypto = plugin.cryptoApi;
   plugin.cryptoApi = null;
