@@ -1,4 +1,4 @@
-/* XU Secret Vault 0.3.2 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
+/* XU Secret Vault 0.3.3 — e2e / 安全加固负向测试（Node 原生 WebCrypto + Obsidian 桩） */
 'use strict';
 
 const fs = require('fs');
@@ -519,7 +519,7 @@ try {
   const plugin = new XUSecretVault(app, {
     id: 'xu-secret-vault',
     name: 'XU Secret Vault',
-    version: '0.3.2',
+    version: '0.3.3',
     minAppVersion: '1.13.0',
   });
   activePlugin = plugin;
@@ -2169,9 +2169,145 @@ try {
     '负向：data.json 不含密码、主密码或笔记内容'
   );
 
-  plugin.lock();
+  // 28) i18n 占位符：下拉文案、全量词条扫描与调用点审计
+  const flattenDefs = (defs) => {
+    const out = [];
+    for (const def of defs) {
+      if (Array.isArray(def.items)) out.push(...flattenDefs(def.items));
+      else out.push(def);
+    }
+    return out;
+  };
+  const readBgLockOptions = () => {
+    const defs = flattenDefs(plugin.settingTab.getSettingDefinitions());
+    const def = defs.filter((item) => item.name === plugin.t('setting_bg_lock'))[0];
+    ok(!!def && typeof def.render === 'function', '找到「失焦锁定倒计时」设置项');
+    const options = [];
+    let selected = null;
+    let onChange = null;
+    const dropdown = {
+      addOption(value, label) {
+        options.push({ value, label });
+        return this;
+      },
+      setValue(value) {
+        selected = value;
+        return this;
+      },
+      onChange(fn) {
+        onChange = fn;
+        return this;
+      },
+    };
+    def.render({ addDropdown: (callback) => callback(dropdown) });
+    return { options, selected, onChange };
+  };
 
-  console.log('');
+  plugin.settings.language = 'zh';
+  let bgOptions = readBgLockOptions();
+  ok(
+    bgOptions.options.map((item) => item.label).join('|') ===
+      '立即（严格）|5 秒|10 秒|30 秒|60 秒|120 秒',
+    '失焦倒计时下拉文案精确匹配（中文）'
+  );
+  ok(bgOptions.selected === '30', '失焦倒计时下拉默认选中 30 秒');
+  ok(
+    bgOptions.options.every((item) => !/[{}]/.test(item.label)),
+    '中文下拉 6 项均无未替换的 { 占位符'
+  );
+  bgOptions.onChange('10');
+  await waitFor(() => plugin.settings.backgroundLockSeconds === 10, '切换倒计时为 10 秒');
+  bgOptions = readBgLockOptions();
+  ok(bgOptions.selected === '10', '切换后下拉仍显示 10 秒');
+  ok(
+    bgOptions.options.map((item) => item.label).indexOf('10 秒') >= 0 &&
+      bgOptions.options.map((item) => item.label).indexOf('10 seconds') < 0,
+    '切换后文案仍正确'
+  );
+
+  plugin.settings.language = 'en';
+  bgOptions = readBgLockOptions();
+  ok(
+    bgOptions.options.map((item) => item.label).join('|') ===
+      'Immediate (strict)|5 seconds|10 seconds|30 seconds|60 seconds|120 seconds',
+    '失焦倒计时下拉文案精确匹配（英文）'
+  );
+  ok(
+    bgOptions.options.every((item) => !/[{}]/.test(item.label)),
+    '英文下拉 6 项均无未替换的 { 占位符'
+  );
+  plugin.settings.language = 'zh';
+  plugin.settings.backgroundLockSeconds = 10;
+  await plugin.saveSettings();
+  plugin.settings.backgroundLockSeconds = 30;
+  await plugin.saveSettings();
+
+  // 全量词条：自动为每个占位符提供参数，确保两语言下都不残留 {xxx}
+  const allKeys = plugin.listI18nKeys();
+  ok(allKeys.length >= 120, 'i18n 词条覆盖中英两语言');
+  for (const lang of ['zh', 'en']) {
+    plugin.settings.language = lang;
+    const leftovers = [];
+    for (const key of allKeys) {
+      const template = plugin.t(key);
+      const vars = {};
+      for (const token of template.match(/\{([A-Za-z][A-Za-z0-9_]*)\}/g) || []) {
+        vars[token.slice(1, -1)] = '填充值';
+      }
+      const filled = plugin.t(key, vars);
+      if (/[{}]/.test(filled)) leftovers.push(key + '=' + filled);
+    }
+    ok(leftovers.length === 0, `${lang} 语言下全部 i18n 占位符均已替换` + (leftovers.length ? '：' + leftovers.join(' | ') : ''));
+  }
+
+  // 调用点审计：含占位符的词条不允许以 t('key') 无参形式调用
+  plugin.settings.language = 'zh';
+  const placeholderKeys = new Set(
+    allKeys.filter((key) => /\{[A-Za-z][A-Za-z0-9_]*\}/.test(plugin.t(key)))
+  );
+  ok(placeholderKeys.size >= 5, '识别出多个含占位符的词条');
+  const callSiteSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const noArgCall = /(?:this\.plugin\.t|this\.t|plugin\.t|\bt)\(\s*'([A-Za-z0-9_]+)'\s*\)/g;
+  const missingVars = new Set();
+  let callMatch;
+  while ((callMatch = noArgCall.exec(callSiteSource))) {
+    if (placeholderKeys.has(callMatch[1])) missingVars.add(callMatch[1]);
+  }
+  ok(
+    missingVars.size === 0,
+    '所有含占位符的 t() 调用都传入参数' + (missingVars.size ? '：' + Array.from(missingVars).join(',') : '')
+  );
+
+  // 逐条精确校验常见占位符文案（中文）
+  plugin.settings.language = 'zh';
+  const zhCases = [
+    ['setting_bg_lock_seconds', { n: 5 }, '5 秒'],
+    ['notice_copied', { seconds: 30 }, '已复制，30 秒后自动清空剪贴板。'],
+    ['mask_countdown', { seconds: 10 }, '将在 10 秒后锁定'],
+    ['err_unlock_backoff', { seconds: 15 }, '尝试次数过多，请在 15 秒后重试。'],
+    ['readonly_copy_path', { path: '/vault.json' }, '当前文件：/vault.json'],
+    ['conflict_banner', { path: '/copy.json' }, '/copy.json'],
+  ];
+  for (const [key, vars, expected] of zhCases) {
+    const text = plugin.t(key, vars);
+    ok(text.indexOf(expected) >= 0 && !/[{}]/.test(text), '占位符替换正确：' + key);
+  }
+  const sensitiveText = plugin.t('notice_sensitive_columns', { count: 2 });
+  ok(
+    sensitiveText.indexOf('本表 2 列') >= 0 && !/[{}]/.test(sensitiveText),
+    '占位符替换正确：notice_sensitive_columns'
+  );
+  plugin.settings.language = 'en';
+  ok(
+    plugin.t('setting_bg_lock_seconds', { n: 5 }).indexOf('5 seconds') === 0 &&
+      !/[{}]/.test(plugin.t('setting_bg_lock_seconds', { n: 5 })),
+    '英文占位符替换正确：setting_bg_lock_seconds'
+  );
+  plugin.settings.backgroundLockSeconds = 30;
+  plugin.settings.language = 'zh';
+  await plugin.saveSettings();
+
+  plugin.lock();
   console.log('CREATE_MS=' + createMs + '  UNLOCK_MS=' + unlockMs);
   console.log('ASSERTIONS=' + assertions + '  FAILURES=' + failures.length);
   if (failures.length) {

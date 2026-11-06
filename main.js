@@ -221,6 +221,7 @@ const I18N = {
     label_vault_source: '选择要加载的保险库文件',
     hint_vault_source: '检测到冲突副本。插件不会自动挑选，请确认要解锁的是哪一个文件。',
     err_rollback_kept: '自动回滚未成功，已保留旧密文备份：{path}',
+    err_rollback_prefix: '自动回滚未成功，已保留旧密文备份：',
     err_conflict_copy_readonly: '正在查看冲突副本（只读）。它不会写回正式保险库；如需采用其中的内容，请先备份正式库并手动重命名该副本。',
     readonly_copy_path: '当前文件：{path}',
     err_save_failed: '无法写入保险库文件，请检查文件写入权限后重试。',
@@ -386,6 +387,7 @@ const I18N = {
     label_vault_source: 'Vault file to load',
     hint_vault_source: 'Conflict copies were found. Nothing is picked automatically — choose the file you want to unlock.',
     err_rollback_kept: 'Automatic rollback failed; the previous ciphertext backup was kept at {path}.',
+    err_rollback_prefix: 'Automatic rollback failed; the previous ciphertext backup was kept at ',
     err_conflict_copy_readonly: 'You are viewing a conflict copy (read-only). Changes are never written back to the official vault; to adopt its contents, back up the official vault first and rename this copy manually.',
     readonly_copy_path: 'Current file: {path}',
     err_save_failed: 'Could not write the vault file. Check file write permissions and try again.',
@@ -647,7 +649,8 @@ function decodePayload(data) {
 class SecretVaultSettingTab extends PluginSettingTab {
   getSettingDefinitions() {
     const plugin = this.plugin;
-    const t = (key) => plugin.t(key);
+    // 必须转发 vars，否则 {n} / {seconds} 等占位符会原样显示
+    const t = (key, vars) => plugin.t(key, vars);
     return [
       {
         name: t('setting_title'),
@@ -1842,6 +1845,11 @@ class XUSecretVault extends Plugin {
     return monotonicNow();
   }
 
+  // 供测试遍历：两语言并集的全部 i18n 词条键
+  listI18nKeys() {
+    return Array.from(new Set([...Object.keys(I18N.zh), ...Object.keys(I18N.en)]));
+  }
+
   t(key, vars) {
     const lang = this.settings && this.settings.language === 'en' ? 'en' : 'zh';
     const dict = I18N[lang] || I18N.zh;
@@ -2533,7 +2541,7 @@ class XUSecretVault extends Plugin {
     if (!error || typeof error !== 'object') return new Error(this.t('err_save_failed'));
     if (error.code === 'xsv-conflict' || error.discarded) return error;
     const message = errorMessage(error);
-    const rollbackPrefix = this.t('err_rollback_kept').split('{')[0];
+    const rollbackPrefix = this.t('err_rollback_prefix');
     const rollbackIndex = message.indexOf(rollbackPrefix);
     const rollbackNote = rollbackIndex >= 0 ? ' ' + message.slice(rollbackIndex) : '';
     if (opts && opts.mustNotExist && /Destination file already exists/i.test(message)) {

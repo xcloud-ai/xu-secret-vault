@@ -136,7 +136,7 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 ### 方式一：从 Obsidian 社区目录安装
 
-当前版本 0.3.2 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
+当前版本 0.3.3 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
 
 ### 方式二：手动安装
 
@@ -227,6 +227,13 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 备份方式就是复制 `xu-secrets.enc` 这个密文文件本身；不需要也不应该导出明文。恢复时把该文件放回原路径即可。
 
 ## 版本记录
+
+### 0.3.3
+
+- 修复「设置 → 安全 → 失焦锁定倒计时」下拉项显示成 `{n} 秒` 的问题：设置页的本地翻译包装只写了 `t(key)`，丢掉了参数；改为 `t(key, vars)` 统一交给 `plugin.t` 做占位符替换。数值与选择逻辑本来就正常，只是文案模板未渲染。
+- 全量复查中英 i18n 占位符（`{n}`、`{seconds}`、`{path}`、`{count}`、`{name}`）：下拉选项、滑块说明、Notice、冲突横幅、只读副本路径、确认弹窗的调用点均已传入参数；另外把 `err_rollback_kept` 里“只取 `{` 之前内容”的隐式用法拆成独立的无占位符词条 `err_rollback_prefix`。
+- 防回归：遍历全部 i18n 词条，为每个占位符自动提供参数，断言中英两种语言下输出都不含 `{` / `}`；再静态扫描 `main.js` 中所有 `t('key')` 无参调用，模板含占位符即判失败。
+- 测试 546 条断言（原 523 条不退化，新增 23 条），包含下拉 6 项中文 `立即（严格） / 5 秒 / 10 秒 / 30 秒 / 60 秒 / 120 秒` 与英文 `Immediate (strict) / 5 seconds / …` 的精确匹配。
 
 ### 0.3.2
 
