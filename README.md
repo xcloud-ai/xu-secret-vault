@@ -16,11 +16,12 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 信封头参数（版本、KDF 算法、迭代数、盐）与加密算法一起参与 GCM 认证（AAD），篡改文件头或算法名会导致解密失败。
 - 会话密钥为 non-extractable CryptoKey，仅驻留内存；锁定、关闭插件或自动锁定后立即丢弃。
 - 界面只有笔记：整页标签中维护一篇加密笔记，可用 Markdown 手写账号表与说明，支持标题、列表、粗体、行内代码、管道表格、http/https 链接。
-- 表格单元格即复制单元：点击任意非空单元格直接复制其文本（免选中），给出「已复制」轻量提示，沿用 30 秒剪贴板自动清空；单元格内容是链接时改为用系统浏览器打开，空单元格点击不做任何事。单元格文本始终可见，不做默认掩码。
-- `{{条目名.密码}}` 引用（点击引用即复制，沿用 30 秒剪贴板清空）；条目不存在时显示灰色「引用缺失」。0.3.0 起不再提供条目管理界面，但旧保险库里的 `entries` 继续被解析与保留，旧引用仍可只读使用。
-- 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦立即加遮罩并清屏，后台超过 60 秒直接锁定；锁定时清空整页明文、编辑区、草稿与复制缓存并丢弃密钥。
+- 表格单元格按**纯文本**显示与复制：不再解析 `{{条目.字段}}` 引用，也不做行内 Markdown；唯一例外是整格为 `[文字](http/https...)` 或裸 http/https URL 时渲染为可点链接。支持 `\|` 与 `\\` 转义，显示与复制都用还原后的值。
+- 单元格即复制单元：点击任意非空单元格直接复制其文本（免选中），给出「已复制」轻量提示，沿用 30 秒剪贴板自动清空；空单元格点击不做任何事。
+- 密文列自动识别：表头命中「列显示规则」的列显示为 `••••••`，旁边小眼睛按钮可临时显示，点击单元格复制真实值；规则可在设置页增删、切换明文/密文，改动立即重渲染。默认把密码、口令、password、pwd、token、secret、密钥、私钥按密文处理，名称、账号、网址、备注按明文。
+- 自动锁定（默认 15 分钟无操作）；切到后台或窗口失焦**立即加遮罩并清屏**，但会话保留，倒计时结束才锁定（默认 30 秒，可选立即 / 5 / 10 / 30 / 60 / 120 秒）；倒计时内回到窗口自动解除遮罩，不要求重输主密码。后台超过 60 秒仍强制锁定。锁定时清空整页明文、编辑区、草稿、复制缓存并丢弃密钥。
 - 写盘采用「写唯一 `.tmp` → 读回解密比对 → 留 `.bak` → rename 原子替换 → 终检 → 删 `.bak`」；任一步失败都保留或回滚旧文件，启动时清理本插件遗留的 `*.tmp*`。检测到文件被外部修改时拒绝覆盖，并另存 `*.conflict-时间戳.enc` 副本，冲突后必须先「重新加载」才能继续编辑。
-- 回到前台后的重新验证与解锁同等强度：重新付出完整 KDF 成本并解开会话挑战密文，不使用无盐哈希比对；连续错误复用同一套指数退避。
+- 倒计时结束、新开第二个面板等需要重新验证的场景，与解锁同等强度：重新付出完整 KDF 成本并解开会话挑战密文，不使用无盐哈希比对；连续错误复用同一套指数退避。
 - 信封格式升级为 v2，并保留 v1 兼容读取：旧信封解密成功后提示并自动升级为 v2；未知版本明确提示「版本不支持」，不会被误读成密码错误。
 - 连续解锁失败按指数退避（上限 30 秒），计数只在内存，重启清零。
 - 界面支持中文（默认）与 English。
@@ -32,66 +33,110 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - Envelope header parameters (version, KDF algorithm, iterations, salt) are authenticated together with the cipher algorithm as AES-GCM additional data, so header tampering breaks decryption.
 - The session key is a non-extractable CryptoKey kept only in memory and dropped on lock, unload or auto-lock.
 - The full UI is notes-only: one encrypted Markdown note per vault, with headings, lists, bold, inline code, pipe tables and http/https links.
-- Every table cell is a copy unit: clicking a non-empty cell copies its text (no selection needed) with a lightweight "Copied" notice, reusing the 30-second clipboard clearing. If the cell is a link, the system browser opens instead; empty cells do nothing. Cell text stays visible (no default masking).
-- `{{entry.password}}` references (click a reference to copy it, using the same 30-second clipboard clearing); missing entries render as a grey "missing reference". Entry management UI was removed in 0.3.0, but legacy `entries` are still parsed and preserved, and old references remain readable.
-- Auto-lock after 15 minutes idle by default; backgrounding or losing window focus masks the full page immediately, and more than 60 seconds in the background locks it.
+- Table cells are **literal text** for display and copy: `{{entry.field}}` references and inline Markdown are no longer parsed; the only exception is a whole cell that is `[label](http/https...)` or a bare http/https URL, which renders as a clickable link. `\|` and `\\` escapes are supported and unescaped for both display and copy.
+- Every non-empty cell is a copy unit: clicking it copies its text (no selection needed) with a lightweight "Copied" notice, reusing the 30-second clipboard clearing; empty cells do nothing.
+- Sensitive columns follow the configurable **column display rules**: matching headers show `••••••`, an eye button reveals temporarily, and clicking the cell copies the real value. Rules can be added, removed or switched between plain/secret in settings and re-render immediately. Defaults treat password, token, secret, key and their Chinese equivalents as secret, and name, account, URL and notes as plain.
+- Auto-lock after 15 minutes idle by default; backgrounding or losing window focus **masks and clears immediately**, but keeps the session and locks only when the countdown ends (default 30 seconds; immediate / 5 / 10 / 30 / 60 / 120). Returning within the countdown unmasks without the master password. More than 60 seconds in the background still forces a lock.
 - Writes use "write a unique .tmp, decrypt-verify, keep .bak, atomic rename, final verify, delete .bak"; any failure keeps or rolls back the old file, and stale `*.tmp*` files are cleaned at startup. External modifications are never overwritten and are saved as a `*.conflict-<timestamp>.enc` copy, which requires "Reload" before editing continues.
-- Re-verifying after returning to the foreground costs a full KDF derivation and decrypts an in-session challenge ciphertext; it never compares an unsalted hash, and repeated failures reuse the same exponential backoff.
+- Re-verification (after the countdown ends or when opening a second panel) costs a full KDF derivation and decrypts an in-session challenge ciphertext; it never compares an unsalted hash, and repeated failures reuse the same exponential backoff.
 - The envelope format is now v2 with v1 compatibility reads: legacy envelopes are decrypted, announced and upgraded to v2 automatically; unknown versions report "unsupported version" instead of a password error.
 - Repeated unlock failures use exponential backoff capped at 30 seconds, kept in memory only.
 - UI language: Chinese (default) and English.
 
 ## 笔记与表格
 
-0.3.0 起保险库只有笔记一种界面：面板顶部不再有「表格 / 笔记」切换，也不再有条目列表和新增 / 编辑 / 删除表单。整页标签里只有一篇加密笔记，正文整体随保险库一起加密落盘。
+0.3.0 起保险库只有笔记一种界面：面板顶部不再有「表格 / 笔记」切换，也不再有条目列表和新增 / 编辑 / 删除表单。整页标签里只有一篇加密笔记，正文整体随保险库一起加密落盘。0.3.1 起不再解析 `{{条目.字段}}` 引用，表格单元格按纯文本逐字显示与复制。
 
 - 笔记编辑：点击「编辑笔记」进入等宽 textarea，直接写 Markdown 源码，「保存笔记」走与其它数据相同的原子写链路。
 - 渲染范围：标题、段落、无序/有序列表、粗体、行内代码、管道表格、链接。表格的 `:---` / `---:` / `:---:` 会按列渲染为左/右/居中；表格宽度自适应，过长时整页内容区提供横向滚动。
-- 单元格点击复制：表格中的**非空数据单元格**点击即复制该单元格文本，右下角弹出轻量「已复制」提示，并沿用 30 秒剪贴板自动清空。表头单元格不参与复制（点击无动作），空单元格点击也不复制、不提示。单元格文本保持可见，复制是免选中的便利，不是隐藏值。
+- 单元格点击复制：表格中的**非空数据单元格**点击即复制该单元格文本，右下角弹出轻量「已复制」提示，并沿用 30 秒剪贴板自动清空。表头单元格不参与复制（点击无动作），空单元格点击也不复制、不提示。
 - 链接单元格：单元格内容整体是 `[文字](https://...)` 或裸 `http/https` URL 时，点击改用系统浏览器打开，不复制文本。
+- 密文列：表头命中「列显示规则」的列默认显示 `••••••`，旁边小眼睛临时显示，点击单元格复制真实值；遮罩、锁定、失焦时已临时显示的值立即回到掩码态。
 - 剪贴板不可用时会明确提示「当前环境不支持剪贴板 API，无法自动复制」，不会静默失败。
 - 链接：仅 `http`/`https` 可点击；`javascript:`、`file://` 等其它 scheme 一律按纯文本显示。
-- 引用：`{{条目名}}` 取该条目的密码/内容，`{{条目名.密码}}` 取密码，`{{条目名.账号}}` 取条目名本身。引用渲染为掩码按钮，点击复制对应值，沿用 30 秒剪贴板清空；条目不存在时显示灰色「引用缺失: xxx」。
-- 安全提醒：表格里直接写明文账号密码也能显示，但**写引用更安全**——锁屏截图、误粘贴或分享屏幕时不会带出明文。引用值不会进入 DOM 文本，只在点击时写入剪贴板。
 
-可复制的第一张表：
+### 字面文本规则与转义写法
+
+“输入什么就显示什么、复制出来就是什么”——表格单元格不做任何 Markdown 或引用解释：
+
+- 纯文本：`*`、`_`、`` ` ``、`{{条目.密码}}`、`#`、`<...>`、`&`、emoji、中文标点全部按源码字面显示，复制字节级一致。`<`/`>`/`&` 不会变成 HTML 或实体。
+- 唯一例外：整格是链接时（`[文字](https://...)` 或裸 `http/https` URL）渲染为可点链接，点击开系统浏览器，不复制。
+- 转义：单元格里的 `\|` 显示与复制为 `|`；`\\` 显示与复制为 `\`。源码仍保留转义写法，只有渲染和复制时还原。
+- 其它反斜杠序列（如 `\n`、`\d`）保持原样，不做二次解释。
+- 行内 Markdown（粗体、行内代码）只在普通段落/标题/列表里生效；表格单元格与表头都不解析。
+
+| 源码单元格 | 显示 / 复制 |
+| --- | --- |
+| `P\|*_\`{{}}<>&😀中文，。` | `P\|*_\`{{}}<>&😀中文，。`（其中 `\|` 还原为 `|`） |
+| `C:\\temp\\x` | `C:\temp\x` |
+| `[github.com](https://github.com)` | 可点链接 github.com |
+
+> 上方表格仅说明规则；实际笔记里写 `P\|...` 时，竖线会作为单元格内容而不是列分隔符。
+
+示例表（可直接粘贴；密码列会按规则显示为掩码，点击眼睛可见）：
 
 ```markdown
 # 我的密钥
 
 ## 常用账号
 
-| 名称 | 账号 | 密码 |
-| :--- | :--- | :--- |
-| GitHub | {{GitHub.账号}} | {{GitHub.密码}} |
-| 阿里云 | {{阿里云.账号}} | {{阿里云.密码}} |
-
-- 官网：[GitHub](https://github.com)
-- 备注：`仅限工作使用`
+| 名称 | 账号 | 密码 | 网址 |
+| :--- | :--- | :--- | :--- |
+| GitHub | me@example.com | p@ss\|w0rd*_2026 | [github.com](https://github.com) |
+| 阿里云 | ops@example.com | P@ss-W0rd_*2026 | [aliyun.com](https://console.aliyun.com) |
 ```
 
-旧保险库里已有的 `GitHub`、`阿里云` 条目会继续被解析，上面的引用可以直接使用；但 0.3.0 不再提供新增条目入口，尚未创建的条目名会显示为「引用缺失」。
+- 密码列含 `|`、`*`、`_`，其中竖线用 `\|` 转义；插入示例后渲染与复制都逐字一致。
+- 网址列是 `[显示文字](https://...)`，插入后即可点击跳转。
+- 示例不含任何 `{{...}}` 引用、不依赖条目数据，插入就能直接看效果；**不会自动保存**，点「保存笔记」才落盘。
+
+### 失焦倒计时
+
+- 切到后台或窗口失焦：**立即遮罩并清屏**，但会话密钥保留，不立刻销毁。
+- 倒计时结束才 `lock()` 并清空草稿、渲染区、复制缓存与剪贴板记录。默认 30 秒，设置项可选：立即 / 5 / 10 / 30 / 60 / 120 秒。
+- 倒计时内回到前台：自动解除遮罩、可继续操作，**不要求重输主密码**；倒计时归零则必须重新解锁。
+- 既有的「后台超过 60 秒强制锁」与空闲自动锁（默认 15 分钟）继续生效，三者取最早触发者。
+- 倒计时使用单调钟 + 墙钟双时钟取大，合盖唤醒后按实际已过时间判定。
+- 「立即」= 原来的严格行为：失焦即锁定并清空，回来必须重新输入主密码；「30 秒」= 默认平衡。
+
+### 列显示规则怎么配
+
+设置 → 密钥保险库 → 「列显示规则」：
+
+- 一行一条规则：**列名输入框** + **明文 / 密文** 分段按钮 + **删除按钮**；底部「添加自定义列名」（新增空行并自动聚焦）与「恢复默认」（二次确认，确认后才覆盖当前自定义规则）。
+- 预置规则：密文 = 密码、口令、password、pwd、token、secret、密钥、私钥；明文 = 名称、账号、网址、备注。
+- 匹配优先级：精确匹配（大小写不敏感）> 列名包含规则名 > 未命中按明文。多条包含规则同时命中时，取最长的规则名。
+- 密文列行为：`••••••` 掩码、眼睛按钮临时显示、点击单元格复制真实值；遮罩/锁定/失焦时已显示的值立即回到掩码态。
+- 规则改动立即重新渲染当前笔记，不需要重启或重新解锁；表格下方会提示「本表 N 列按密码处理」。
+
+两行示例（把「手机号」设为密文、「邮箱」设为明文）：
+
+| 列名 | 模式 |
+| --- | --- |
+| 手机号 | 密文 |
+| 邮箱 | 明文 |
+
+添加一条自定义规则的完整步骤：点「添加自定义列名」→ 在新行输入 `手机号` → 点该行的「密文」→ 输入框失焦/回车即保存，当前表格立即重渲染；若列名重复会合并为一条，空列名不会保存并给出提示。规则最多 50 行、单条列名最长 40 个字符；`data.json` 只存 `[{ name, mode }]`，绝不保存任何密码、示例值或笔记内容。
 
 ### 整页视图怎么打开
 
 1. 点击左侧功能区的锁图标，按 `Cmd/Ctrl+P` 执行「打开密钥保险库」，或在设置页点击「打开保险库」。
 2. 整页标签会在主编辑区打开：未解锁时是居中的解锁 / 创建卡片；已解锁时上半部分是笔记列表，下方是宽内容区。
 3. 已经打开过整页标签时，再次点击只会聚焦到同一个标签，不会重复新建面板。
-4. 笔记为空时会显示引导块和「插入示例表格」按钮；点它会写入三列示例并进入编辑态，**不会自动保存**，确认后点「保存笔记」。
+4. 笔记为空时会显示引导块和「插入示例表格」按钮；点它会写入四列示例并进入编辑态，**不会自动保存**，确认后点「保存笔记」。
 5. 如果当前笔记已有内容，再点「插入示例表格」会先让你选择「追加到末尾」或「替换全文」，不会静默插入第二份。
 
 ### 旧版侧栏与旧引用
 
 - 0.3.0 不再注册旧版侧栏视图类型；插件启动时会清理残留的旧侧栏实例，因此重载后不会出现「侧栏 + 整页」两个入口。
-- 旧版条目数据不会被删除：`entries` 仍完整保存在密文载荷里，笔记中的 `{{条目名.密码}}` 在条目存在时照常解析（只读使用）。
-- 0.2.1 的「引用缺失 → 点击创建条目」与「保存条目时提示这是笔记内容」随条目 UI 下线一并移除。
-- 笔记编辑态的下方会列出「可用条目名」（只显示名称，不含任何密码），可以直接对照拼写；条目超过 8 个时折叠为「共 N 个，展开查看」。
+- 旧版条目数据不会被删除：`entries` 仍完整保存在密文载荷里；但 0.3.1 起笔记与表格都不再解析 `{{条目名.密码}}`，旧引用会按字面字符串显示和复制（例如显示为 `{{GitHub.密码}}`）。
+- 0.2.1 的「引用缺失 → 点击创建条目」与「保存条目时提示这是笔记内容」随条目 UI 下线一并移除；0.3.1 起「可用条目名」提示条也随引用语法移除。
 
 ## 安装
 
 ### 方式一：从 Obsidian 社区目录安装
 
-当前版本 0.3.0 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
+当前版本 0.3.1 为本地开发版（桌面端限定），尚未提交社区目录。上架后可在「设置 → 社区插件 → 浏览」中搜索 `XU Secret Vault` 安装并启用。
 
 ### 方式二：手动安装
 
@@ -112,8 +157,8 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 1. 点击左侧功能区的锁图标，或按 `Cmd/Ctrl+P` 执行「打开密钥保险库」。
 2. 首次使用：在整页的居中卡片中输入两次主密码，点击「创建保险库」。主密码不会写入磁盘，忘记后无法恢复。
 3. 解锁后进入宽内容区：上方是笔记列表，下方是笔记渲染区。点击「编辑笔记」直接写 Markdown 账号表与说明，点击「保存笔记」落盘。
-4. 表格里每个非空单元格都能点击复制；单元格若是链接则改为打开浏览器。`{{条目名.密码}}` 引用点击复制，沿用 30 秒剪贴板自动清空。
-5. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，后台超过 60 秒会自动锁定。
+4. 表格里每个非空单元格都能点击复制；单元格若是链接则改为打开浏览器。密文列默认显示 `••••••`，眼睛按钮临时显示，点击单元格复制真实值；沿用 30 秒剪贴板自动清空。
+5. 点击「锁定」或执行「锁定保险库」命令；无操作超过设定分钟数也会自动锁定。切换到其它应用会立即加遮罩，倒计时内回来自动恢复，倒计时结束或后台超过 60 秒则锁定。
 
 ### 首次使用
 
@@ -130,6 +175,8 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 | 界面语言 | 中文 | 切换中文 / English。 |
 | 保险库文件路径 | `xu-secrets.enc` | 相对 vault 根目录；必须以 `.enc` 结尾，缺失时自动补全。 |
 | 自动锁定（分钟） | 15 | 无操作超过该时长后自动锁定并清除内存明文；切后台超过 60 秒也会锁定。 |
+| 失焦锁定倒计时 | 30 秒 | 失焦立即遮罩；可选立即 / 5 / 10 / 30 / 60 / 120 秒。倒计时内返回自动恢复，归零则锁定。 |
+| 列显示规则 | 8 条密文 + 4 条明文 | 按表头决定明文或密文，支持增删、切换与恢复默认；改动立即生效。 |
 | 剪贴板清空（秒） | 30 | 复制密钥后自动清空剪贴板；剪贴板已被替换时不会覆盖。 |
 | 立即锁定 | — | 清除内存中的密钥与明文，需要重新输入主密码。 |
 
@@ -150,15 +197,15 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 - 密钥生命周期：派生密钥为 non-extractable，仅保存在内存；锁定、自动锁定、关闭面板或插件卸载时置空。主密码、密钥、明文均不写入 `data.json` 或任何配置文件。
 - 落盘校验：先写唯一命名的 `*.tmp`（内容仍是密文），读回后解密并逐字段比对，留 `.bak` 后 `rename` 原子替换，终检通过再删 `.bak`；任一步失败都会清理 tmp；若 rename 后终检失败，则用 `.bak` 回滚并同步修正哈希记录。启动时清理本插件遗留的 `*.tmp*`。
 - 同步冲突：记录上次读写的文件哈希；`rename` 前还会重取一次哈希复核（缩小 TOCTOU 窗口）。发现外部修改（或凭空出现/消失）时拒绝覆盖，把本次改动另存为 `xu-secrets.conflict-<时间戳>.enc`；内存快照标记为过期，弹窗与入口禁止继续编辑，必须点「重新加载」后才恢复。
-- 抗爆破：连续解锁失败按指数退避（0.5 秒起，上限 30 秒），成功或重启后清零，计数只在内存。回到前台后的重新验证同样付出完整 KDF 成本并受同一套退避约束，不使用无盐哈希比对。
+- 抗爆破：连续解锁失败按指数退避（0.5 秒起，上限 30 秒），成功或重启后清零，计数只在内存。倒计时结束或新开多面板时的重新验证同样付出完整 KDF 成本并受同一套退避约束，不使用无盐哈希比对。
 - 统一失败口径：文件缺失、JSON 畸形、base64 损坏、密码错误对外都只给一条「解锁失败」文案，不向界面抛原始异常；文件缺失单独显示「找不到保险库」错误态，且不会引导重新创建。仅「未知信封版本」单独提示「版本不支持」。
 - 版本兼容：信封格式为 v2（`xsv-aad-v2`）。读取时对 v1 信封先按 v2 AAD、再按 `xsv-aad-v1` 尝试；解密成功后提示并自动重写为 v2。未知版本直接拒绝并提示「版本不支持」。
 - 容量上限：保险库文件超过 8 MB 时拒绝读取与写入，避免超大文件导致解密与整体重加密卡死。
-- 笔记渲染：自带的极简 Markdown 渲染器全程用 DOM API 构建节点，不使用 `innerHTML`/`insertAdjacentHTML`；Markdown 中的 HTML 标签一律按文本转义显示。笔记源码与条目明文一起放在同一个加密载荷里，落盘只有密文。
+- 笔记渲染：自带的极简 Markdown 渲染器全程用 DOM API 构建节点，不使用 `innerHTML`/`insertAdjacentHTML`；Markdown 中的 HTML 标签一律按文本转义显示。表格单元格按 `textContent` 写入，`{{...}}` 与行内 Markdown 不再解析；密文列在 DOM 中只写入 `••••••`，真实值仅在被点击复制或眼睛临时显示时进入内存。笔记源码与条目明文一起放在同一个加密载荷里，落盘只有密文。
 
 ### 锁定的实际动作
 
-触发锁定（手动、自动、命令、关闭整页面板或在后台超过 60 秒）时，插件会同步执行：丢弃 CryptoKey、内存中的条目集合与笔记正文、清空整页中所有已渲染的明文与笔记编辑器/草稿、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。窗口失焦或切到后台时会先加全屏遮罩并清屏，回到前台后必须重新输入主密码才能继续查看；遮罩期间所有写入与复制一律拒绝。
+触发锁定（手动、自动、命令、关闭整页面板、失焦倒计时归零、后台超过 60 秒或空闲超时）时，插件会同步执行：丢弃 CryptoKey、内存中的条目集合与笔记正文、清空整页中所有已渲染的明文与笔记编辑器/草稿、把已临时显示的密文列复位为掩码、清除本插件写入剪贴板的内容（仅当剪贴板仍是该密钥时）。窗口失焦或切到后台时会先加全屏遮罩并清屏：倒计时内回到前台自动恢复且不要求重输主密码；倒计时归零或后台超过 60 秒后必须重新输入主密码。遮罩期间所有写入与复制一律拒绝。
 
 ### 明文可能残留的其他位置
 
@@ -173,13 +220,23 @@ XU Secret Vault keeps passwords, API keys and private keys in a single locally e
 
 - 桌面端限定（`isDesktopOnly: true`）：手机端 WebView 的 `crypto.subtle` 与剪贴板 `readText` 均未实测，因此不宣称移动端可用；后续实测通过再放开。
 - 大保险库（数千条目或超大私钥）每次保存都要整体重加密、解密比对与全文读回，保存耗时随数据量增长；超过 8 MB 直接拒绝。
-- 自动锁定由 15 秒一次的后台检查触发，实际精度取决于检查周期；任意面板交互会重置空闲计时。
+- 空闲自动锁由 15 秒一次的后台检查触发，实际精度取决于检查周期；失焦倒计时由 1 秒一次的计时器检查，并用单调钟 + 墙钟兜底休眠。任意面板交互会重置空闲计时。
 - 不做明文导出/另存为明文、不做主密码提示、不提供密码找回；这些是刻意的安全取舍。
 - 保险库文件被外部程序同时改写时，插件拒绝覆盖并生成 conflict 副本，不会自动合并；冲突后进入只读态，必须「重新加载」才能继续编辑，需要用户自行比对两份文件。
 - v1 兼容读取并升级为 v2 后，旧版插件将无法再读取该文件；升级前请先备份副本。
 - 备份方式就是复制 `xu-secrets.enc` 这个密文文件本身；不需要也不应该导出明文。恢复时把该文件放回原路径即可。
 
 ## 版本记录
+
+### 0.3.1
+
+- 取消 `{{条目.字段}}` 引用语法：笔记与表格单元格一律按字面文本显示与复制，`entries` 数据仍完整保留、不清空；旧引用文本会显示为字面字符串。
+- 表格单元格改为纯文本渲染，不做行内 Markdown；唯一例外是整格为 `[文字](http/https...)` 或裸 http/https URL 时渲染为可点链接。支持 `\|` → `|`、`\\` → `\` 转义（源码保留转义写法），其它反斜杠序列不解释。
+- 失焦/切后台改为可调倒计时：立即遮罩但不销毁会话，默认 30 秒，可选立即 / 5 / 10 / 30 / 60 / 120 秒；倒计时内返回自动恢复、不重输主密码，归零则锁定清屏。原有 60 秒后台强制锁与 15 分钟空闲锁保留，三者取最早。
+- 新增设置页「列显示规则」：一行一条 `列名 + 明文/密文`，支持添加、删除、切换、恢复默认（二次确认）；精确匹配优先于包含匹配，未命中按明文；改动立即重渲染当前笔记。
+- 密文列显示 `••••••`，眼睛按钮临时显示，点击单元格复制真实值；遮罩/锁定/失焦时揭示态立即复位，锁定后 DOM 不残留明文。
+- 示例表格改为四列（名称 / 账号 / 密码 / 网址），密码列含 `\|`、`*`、`_` 特殊字符，网址列使用可点链接，插入后即可看到明文列、密文列、链接与特殊符号复制的实际效果。
+- 测试增至 493 条断言，新增特殊符号逐字一致、转义、链接格、倒计时恢复/到点锁定、密文列掩码/眼睛/复制、揭示态复位、列规则增删改/优先级/恢复确认/脏数据归一化/设置页动态行等覆盖。
 
 ### 0.3.0
 

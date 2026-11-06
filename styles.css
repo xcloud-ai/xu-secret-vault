@@ -362,14 +362,144 @@
   background: var(--background-secondary);
 }
 
-/* {{条目名.密码}} 引用：值不落到文本节点，只保留在闭包与插件内存 */
-.xsv-ref {
-  margin: 0 2px;
+/* 密文列：掩码、眼睛按钮与表格说明 */
+.xsv-cell-secret {
+  white-space: nowrap;
 }
 
-.xsv-ref-missing {
-  margin: 0 2px;
+.xsv-secret-text {
+  font-family: var(--font-monospace);
+  letter-spacing: 0.08em;
+}
+
+.xsv-eye-btn {
+  margin-left: 8px;
+  padding: 0 4px;
+  font-size: 0.92em;
+  line-height: 1.3;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.xsv-eye-btn:hover,
+.xsv-eye-btn-active {
+  opacity: 1;
+  background: var(--background-modifier-hover);
+}
+
+.xsv-sensitive-note {
+  margin-top: 6px;
+  font-size: 0.82em;
+  line-height: 1.5;
   color: var(--text-faint);
-  font-size: 0.86em;
+}
+
+.xsv-mask-countdown {
+  font-size: 0.95em;
+  font-weight: 600;
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 设置页：列显示规则动态行 */
+.setting-item:has(> .xsv-rule-editor) {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.xsv-rule-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 100%;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.xsv-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.xsv-rule-name {
+  flex: 1 1 auto;
+  min-width: 120px;
+  max-width: 320px;
+  padding: 4px 8px;
+  font-size: 0.9em;
+  color: var(--text-normal);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.xsv-rule-name:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.xsv-rule-mode {
+  display: inline-flex;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.xsv-seg-btn {
+  padding: 4px 10px;
+  font-size: 0.84em;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  border: none;
+  cursor: pointer;
+}
+
+.xsv-seg-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.xsv-seg-btn-active {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+}
+
+.xsv-rule-remove {
+  padding: 2px 8px;
+  font-size: 0.95em;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.xsv-rule-remove:hover {
+  color: var(--text-error);
+  background: var(--background-modifier-hover);
+}
+
+.xsv-rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.xsv-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.xsv-btn-danger {
+  color: var(--text-on-accent);
+  background: var(--text-error);
+  border-color: var(--text-error);
 }
 

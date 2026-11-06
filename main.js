@@ -1,7 +1,7 @@
 /* XU Secret Vault — 本地加密密钥保险库（明文不落盘） */
 'use strict';
 
-const { ItemView, Notice, Plugin, PluginSettingTab, Setting } = require('obsidian');
+const { ItemView, Modal, Notice, Plugin, PluginSettingTab, Setting } = require('obsidian');
 
 const PLUGIN_ID = 'xu-secret-vault';
 const VIEW_TYPE = 'xu-secret-vault-page';
@@ -22,6 +22,27 @@ const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const MAX_VAULT_BYTES = 8 * 1024 * 1024;
 const HIDDEN_LOCK_MS = 60000;
+const BACKGROUND_LOCK_CHOICES = [0, 5, 10, 30, 60, 120];
+const DEFAULT_BACKGROUND_LOCK_SECONDS = 30;
+const COLUMN_RULE_LIMIT = 50;
+const COLUMN_RULE_NAME_MAX = 40;
+const COLUMN_RULE_MODES = ['plain', 'secret'];
+// 列显示规则：精确匹配 > 包含匹配 > 未命中按明文；名字大小写不敏感
+const DEFAULT_COLUMN_RULES = [
+  { name: '密码', mode: 'secret' },
+  { name: '口令', mode: 'secret' },
+  { name: 'password', mode: 'secret' },
+  { name: 'pwd', mode: 'secret' },
+  { name: 'token', mode: 'secret' },
+  { name: 'secret', mode: 'secret' },
+  { name: '密钥', mode: 'secret' },
+  { name: '私钥', mode: 'secret' },
+  { name: '名称', mode: 'plain' },
+  { name: '账号', mode: 'plain' },
+  { name: '网址', mode: 'plain' },
+  { name: '备注', mode: 'plain' },
+];
+const MASK_PLACEHOLDER = '••••••';
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 30000;
 const ENTRY_TYPES = ['password', 'api-key', 'private-key', 'note'];
@@ -33,6 +54,8 @@ const DEFAULT_SETTINGS = {
   vaultPath: DEFAULT_VAULT_PATH,
   autoLockMinutes: 15,
   clipboardClearSeconds: 30,
+  backgroundLockSeconds: DEFAULT_BACKGROUND_LOCK_SECONDS,
+  columnRules: DEFAULT_COLUMN_RULES,
   initializedPath: '',
 };
 
@@ -81,12 +104,12 @@ const I18N = {
     btn_sample_append: '追加到末尾',
     btn_sample_replace: '替换全文',
     note_guide_title: '从这里开始写账号表',
-    note_guide_desc: '笔记模式会像 Markdown 笔记一样渲染表格、链接与引用。点「插入示例表格」会把三列示例写进编辑器，不会自动保存。',
+    note_guide_desc: '笔记模式会像 Markdown 笔记一样渲染表格与链接；表格单元格按纯文本显示，不做行内 Markdown 或引用解析。点「插入示例表格」会把三列示例写进编辑器，不会自动保存。',
     notice_notes_mode_hint: '这里是笔记模式：可以像写 Markdown 一样维护账号表，保存后表格会渲染出来。',
     notice_note_content_hint: '这段看起来是笔记内容，笔记模式里会渲染成表格。',
     notice_cell_copied: '已复制',
     note_empty: '这篇笔记还没有内容，点击「编辑笔记」开始写 Markdown。',
-    note_editor_hint: '支持 Markdown：标题、列表、粗体、行内代码、管道表格、链接（仅 http/https）与 {{条目名.密码}} 引用。',
+    note_editor_hint: '支持 Markdown：标题、列表、粗体、行内代码、管道表格、链接（仅 http/https）。表格单元格按纯文本显示与复制，可用 \\| 表示单元格内的竖线、\\\\ 表示反斜杠，其它反斜杠保持原样。',
     err_note_missing: '笔记不存在或已被移除。',
     btn_cancel: '取消',
     btn_save: '保存',
@@ -142,6 +165,21 @@ const I18N = {
     setting_vault_path_desc: '相对 vault 根目录的路径，必须以 .enc 结尾（缺失时自动补全）。默认 xu-secrets.enc。',
     setting_auto_lock: '自动锁定（分钟）',
     setting_auto_lock_desc: '无操作超过该时长后自动锁定（默认 15 分钟）；切到后台超过 60 秒也会立即锁定，并清除内存中的密钥与已显形的明文。',
+    setting_bg_lock: '失焦锁定倒计时',
+    setting_bg_lock_desc: '窗口失焦或切到后台时立即加遮罩，倒计时结束后才锁定并清屏。倒计时内回到窗口会自动解除遮罩，不要求重输主密码；默认 30 秒。选「立即」等于原来的严格行为：立刻锁定，必须重新输入主密码。',
+    setting_bg_lock_immediate: '立即（严格）',
+    setting_bg_lock_seconds: '{n} 秒',
+    setting_column_rules: '列显示规则',
+    setting_column_rules_desc: '按列名决定明文或密文。精确匹配优先，其次列名包含规则名，未命中按明文。密文列显示 ••••••，眼睛按钮可临时显示，点击单元格复制真实值；规则改动会立即重新渲染当前笔记。',
+    column_rule_name_placeholder: '列名，例如 手机号',
+    column_rule_mode_plain: '明文',
+    column_rule_mode_secret: '密文',
+    btn_add_column_rule: '添加自定义列名',
+    btn_restore_default_rules: '恢复默认',
+    confirm_restore_rules: '恢复默认列显示规则？当前自定义规则会被覆盖。',
+    notice_rule_name_empty: '列名不能为空，未保存。',
+    notice_rule_limit: '最多 {limit} 条列显示规则，已忽略新增。',
+    notice_rules_restored: '已恢复默认列显示规则。',
     setting_clipboard_clear: '剪贴板清空（秒）',
     setting_clipboard_clear_desc: '复制密钥后经过该时长自动清空剪贴板；若期间剪贴板已被替换则不会覆盖新内容。',
     setting_lock_now: '立即锁定',
@@ -178,8 +216,14 @@ const I18N = {
     notice_background_locked: '插件在后台超过 60 秒，保险库已自动锁定。',
     notice_reverify_failed: '验证失败，请重新输入主密码。',
     mask_title: '内容已隐藏',
-    mask_desc: '窗口失去焦点或切到后台，面板已加上遮罩并清除已显形的明文。请输入主密码继续查看。',
+    mask_desc: '窗口失去焦点或切到后台，面板已加上遮罩并清除已显形的明文。倒计时结束前回到窗口会自动恢复，无需重输主密码；倒计时结束将锁定。',
+    mask_countdown: '将在 {seconds} 秒后锁定',
+    mask_return_hint: '回到窗口会自动解除遮罩；倒计时归零则必须重新输入主密码。',
     btn_reverify: '验证并继续',
+    btn_eye_show: '临时显示密码',
+    btn_eye_hide: '隐藏密码',
+    notice_sensitive_columns: '本表 {count} 列按密码处理：单元格显示掩码，点击复制真实值，眼睛按钮切换显示。',
+    notice_countdown_locked: '失焦倒计时结束，保险库已锁定。',
   },
   en: {
     cmd_open: 'Open secret vault',
@@ -225,12 +269,12 @@ const I18N = {
     btn_sample_append: 'Append',
     btn_sample_replace: 'Replace all',
     note_guide_title: 'Start your account table here',
-    note_guide_desc: 'Notes mode renders tables, links and references like a Markdown note. "Insert sample table" writes a three-column example into the editor and does not save automatically.',
+    note_guide_desc: 'Notes mode renders tables and links like a Markdown note. Table cells are shown as literal text, with no inline Markdown or reference parsing. "Insert sample table" writes a three-column example into the editor and does not save automatically.',
     notice_notes_mode_hint: 'This is notes mode: maintain an account table like a Markdown note; tables render after saving.',
     notice_note_content_hint: 'This looks like note content; notes mode will render it as a table.',
     notice_cell_copied: 'Copied',
     note_empty: 'This note is empty. Click "Edit note" to start writing Markdown.',
-    note_editor_hint: 'Markdown support: headings, lists, bold, inline code, pipe tables, links (http/https only) and {{entry.password}} references.',
+    note_editor_hint: 'Markdown support: headings, lists, bold, inline code, pipe tables and links (http/https only). Table cells are shown and copied as literal text; use \\| for a pipe inside a cell and \\\\ for a backslash; other backslash sequences stay as-is.',
     err_note_missing: 'The note does not exist or has been removed.',
     btn_cancel: 'Cancel',
     btn_save: 'Save',
@@ -286,6 +330,21 @@ const I18N = {
     setting_vault_path_desc: 'Path relative to the vault root. It must end with .enc (added automatically if missing). Default: xu-secrets.enc.',
     setting_auto_lock: 'Auto-lock (minutes)',
     setting_auto_lock_desc: 'Lock automatically after this idle period (default 15 minutes). Moving to the background for more than 60 seconds also locks immediately and clears keys and revealed plaintext from memory.',
+    setting_bg_lock: 'Blur lock countdown',
+    setting_bg_lock_desc: 'When the window loses focus or moves to the background, the page is masked immediately and the vault locks only after the countdown. Returning within the countdown unmask automatically without the master password; default 30 seconds. "Immediate" is the old strict behavior: lock at once and require the master password again.',
+    setting_bg_lock_immediate: 'Immediate (strict)',
+    setting_bg_lock_seconds: '{n} seconds',
+    setting_column_rules: 'Column display rules',
+    setting_column_rules_desc: 'Decide plain or secret display by column name. Exact matches win, then a column name containing the rule name; unmatched columns are plain. Secret cells show ••••••, the eye button reveals temporarily, and clicking the cell copies the real value. Rule changes re-render the current note immediately.',
+    column_rule_name_placeholder: 'Column name, e.g. phone',
+    column_rule_mode_plain: 'Plain',
+    column_rule_mode_secret: 'Secret',
+    btn_add_column_rule: 'Add custom column name',
+    btn_restore_default_rules: 'Restore defaults',
+    confirm_restore_rules: 'Restore the default column display rules? Your custom rules will be overwritten.',
+    notice_rule_name_empty: 'Column name cannot be empty; nothing was saved.',
+    notice_rule_limit: 'At most {limit} column display rules; the new one was ignored.',
+    notice_rules_restored: 'Default column display rules restored.',
     setting_clipboard_clear: 'Clipboard clear (seconds)',
     setting_clipboard_clear_desc: 'Clear the clipboard after copying a secret. If the clipboard has been replaced meanwhile, the new content is left untouched.',
     setting_lock_now: 'Lock now',
@@ -322,8 +381,14 @@ const I18N = {
     notice_background_locked: 'The plugin was in the background for over 60 seconds, so the vault was locked.',
     notice_reverify_failed: 'Verification failed. Enter the master password again.',
     mask_title: 'Content hidden',
-    mask_desc: 'The window lost focus or moved to the background, so the panel is masked and revealed plaintext was cleared. Enter the master password to continue.',
+    mask_desc: 'The window lost focus or moved to the background, so the panel is masked and revealed plaintext was cleared. Returning within the countdown restores the view without the master password; when the countdown ends the vault locks.',
+    mask_countdown: 'Locks in {seconds}s',
+    mask_return_hint: 'Returning to the window removes the mask automatically; once the countdown hits zero the master password is required.',
     btn_reverify: 'Verify and continue',
+    btn_eye_show: 'Reveal password temporarily',
+    btn_eye_hide: 'Hide password',
+    notice_sensitive_columns: '{count} column(s) in this table are treated as passwords: cells are masked, clicking copies the real value, and the eye button toggles display.',
+    notice_countdown_locked: 'The blur countdown ended, so the vault was locked.',
   },
 };
 
@@ -414,6 +479,69 @@ function normalizePassword(value) {
 
 function sameJson(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// 列显示规则归一化：只保留 { name, mode }，去空、去重、限长、限行数
+function normalizeRuleName(value) {
+  return String(value == null ? '' : value).trim().slice(0, COLUMN_RULE_NAME_MAX);
+}
+
+function cloneDefaultColumnRules() {
+  return DEFAULT_COLUMN_RULES.map((rule) => ({ name: rule.name, mode: rule.mode }));
+}
+
+function normalizeColumnRules(value) {
+  if (!Array.isArray(value)) return cloneDefaultColumnRules();
+  const names = new Set();
+  const rules = [];
+  for (const item of value) {
+    // 兼容旧格式：字符串条目视为密文规则
+    const legacy = typeof item === 'string';
+    if (!legacy && (!item || typeof item !== 'object')) continue;
+    const name = normalizeRuleName(legacy ? item : item.name);
+    if (!name) continue;
+    const key = name.toLowerCase();
+    const rawMode = legacy ? 'secret' : item.mode;
+    const mode = COLUMN_RULE_MODES.indexOf(rawMode) >= 0 ? rawMode : 'plain';
+    if (names.has(key)) {
+      // 重复列名合并为一条：后出现的模式覆盖先前的
+      const existing = rules.filter((rule) => rule.name.toLowerCase() === key)[0];
+      if (existing) existing.mode = mode;
+      continue;
+    }
+    names.add(key);
+    rules.push({ name, mode });
+    if (rules.length >= COLUMN_RULE_LIMIT) break;
+  }
+  // 非空数组全是脏数据时回到默认规则；显式清空数组则保留为空（全部按明文）
+  if (value.length > 0 && !rules.length) return cloneDefaultColumnRules();
+  return rules;
+}
+
+function normalizeBackgroundSeconds(value) {
+  const seconds = Number(value);
+  return BACKGROUND_LOCK_CHOICES.indexOf(seconds) >= 0 ? seconds : DEFAULT_BACKGROUND_LOCK_SECONDS;
+}
+
+// 单元格解转义：只还原 \| 与 \\，其它反斜杠序列保持原样
+function unescapeCellText(text) {
+  const source = String(text == null ? '' : text);
+  let out = '';
+  let index = 0;
+  while (index < source.length) {
+    const char = source[index];
+    if (char === '\\' && index + 1 < source.length) {
+      const next = source[index + 1];
+      if (next === '|' || next === '\\') {
+        out += next;
+        index += 2;
+        continue;
+      }
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
 }
 
 function fileStamp(date) {
@@ -554,6 +682,34 @@ class SecretVaultSettingTab extends PluginSettingTab {
             control: { type: 'slider', key: 'autoLockMinutes', min: 1, max: 60, step: 1 },
           },
           {
+            name: t('setting_bg_lock'),
+            desc: t('setting_bg_lock_desc'),
+            render: (setting) => {
+              setting.addDropdown((dropdown) => {
+                for (const seconds of BACKGROUND_LOCK_CHOICES) {
+                  dropdown.addOption(
+                    String(seconds),
+                    seconds === 0
+                      ? t('setting_bg_lock_immediate')
+                      : t('setting_bg_lock_seconds', { n: seconds })
+                  );
+                }
+                dropdown.setValue(String(normalizeBackgroundSeconds(plugin.settings.backgroundLockSeconds)));
+                dropdown.onChange(async (value) => {
+                  plugin.settings.backgroundLockSeconds = normalizeBackgroundSeconds(value);
+                  await plugin.saveSettings();
+                });
+              });
+            },
+          },
+          {
+            name: t('setting_column_rules'),
+            desc: t('setting_column_rules_desc'),
+            render: (setting) => {
+              this.renderColumnRulesEditor(setting);
+            },
+          },
+          {
             name: t('setting_clipboard_clear'),
             desc: t('setting_clipboard_clear_desc'),
             control: { type: 'slider', key: 'clipboardClearSeconds', min: 5, max: 120, step: 5 },
@@ -599,6 +755,139 @@ class SecretVaultSettingTab extends PluginSettingTab {
     ];
   }
 
+  // 动态增删行只在本地容器内重绘，避免声明式设置整页重排抖动；
+  // rulesBusy 做重入保护，保存期间忽略重复点击
+  renderColumnRulesEditor(setting) {
+    const plugin = this.plugin;
+    const t = (key, vars) => plugin.t(key, vars);
+    const host = setting.settingEl || setting.controlEl;
+    if (!host || typeof host.createDiv !== 'function') return;
+    const container = host.createDiv({ cls: 'xsv-rule-editor' });
+    let draft = null;
+
+    const refresh = () => {
+      container.empty();
+      const rules = plugin.getColumnRules();
+      const rows = rules.map((rule, index) => ({ rule, index }));
+      if (draft) rows.push({ rule: draft, index: -1, draft: true });
+
+      for (const row of rows) {
+        const rowEl = container.createDiv({ cls: 'xsv-rule-row' });
+        const input = rowEl.createEl('input', { cls: 'xsv-rule-name' });
+        input.setAttribute('type', 'text');
+        input.setAttribute('maxlength', String(COLUMN_RULE_NAME_MAX));
+        input.setAttribute('placeholder', t('column_rule_name_placeholder'));
+        input.value = row.rule.name;
+        input.addEventListener('change', () => {
+          if (this.rulesBusy) return;
+          const value = String(input.value == null ? '' : input.value).trim();
+          if (row.draft) {
+            if (!value) {
+              new Notice(t('notice_rule_name_empty'), 3000);
+              draft = null;
+              refresh();
+              return;
+            }
+            this.rulesBusy = true;
+            void plugin
+              .addColumnRule(value, row.rule.mode)
+              .then((result) => {
+                this.rulesBusy = false;
+                if (result.ok) draft = null;
+                refresh();
+              });
+            return;
+          }
+          this.rulesBusy = true;
+          void plugin
+            .updateColumnRule(row.index, { name: value })
+            .then((result) => {
+              this.rulesBusy = false;
+              if (!result.ok) input.value = row.rule.name;
+              refresh();
+            });
+        });
+
+        // 明文/密文用分段按钮二选一，避免两个独立开关的互斥时序问题
+        const modeGroup = rowEl.createDiv({ cls: 'xsv-rule-mode' });
+        for (const mode of COLUMN_RULE_MODES) {
+          const active = row.rule.mode === mode;
+          const button = modeGroup.createEl('button', {
+            cls: 'xsv-seg-btn' + (active ? ' xsv-seg-btn-active' : ''),
+            text: t(mode === 'secret' ? 'column_rule_mode_secret' : 'column_rule_mode_plain'),
+          });
+          button.setAttribute('type', 'button');
+          button.addEventListener('click', () => {
+            if (this.rulesBusy || active) return;
+            if (row.draft) {
+              draft.mode = mode;
+              refresh();
+              return;
+            }
+            this.rulesBusy = true;
+            void plugin
+              .updateColumnRule(row.index, { mode })
+              .then(() => {
+                this.rulesBusy = false;
+                refresh();
+              });
+          });
+        }
+
+        const remove = rowEl.createEl('button', { cls: 'xsv-rule-remove', text: '×' });
+        remove.setAttribute('type', 'button');
+        remove.setAttribute('title', t('btn_delete'));
+        remove.addEventListener('click', () => {
+          if (this.rulesBusy) return;
+          if (row.draft) {
+            draft = null;
+            refresh();
+            return;
+          }
+          this.rulesBusy = true;
+          void plugin
+            .deleteColumnRule(row.index)
+            .then(() => {
+              this.rulesBusy = false;
+              refresh();
+            });
+        });
+
+        if (row.draft) {
+          // 新增空行并聚焦，未输入名称前不落盘
+          if (typeof input.focus === 'function') input.focus();
+        }
+      }
+
+      const actions = container.createDiv({ cls: 'xsv-rule-actions' });
+      const addButton = actions.createEl('button', { cls: 'xsv-btn xsv-btn-small', text: t('btn_add_column_rule') });
+      addButton.setAttribute('type', 'button');
+      addButton.addEventListener('click', () => {
+        if (this.rulesBusy || draft) return;
+        if (plugin.getColumnRules().length >= COLUMN_RULE_LIMIT) {
+          new Notice(t('notice_rule_limit', { limit: COLUMN_RULE_LIMIT }), 4000);
+          return;
+        }
+        draft = { name: '', mode: 'plain' };
+        refresh();
+      });
+      const restoreButton = actions.createEl('button', {
+        cls: 'xsv-btn xsv-btn-small',
+        text: t('btn_restore_default_rules'),
+      });
+      restoreButton.setAttribute('type', 'button');
+      restoreButton.addEventListener('click', () => {
+        plugin.requestRestoreDefaultColumnRules(() => {
+          draft = null;
+          refresh();
+        });
+      });
+    };
+
+    this.rulesBusy = false;
+    refresh();
+  }
+
   async setControlValue(key, value) {
     if (typeof super.setControlValue === 'function') await super.setControlValue(key, value);
     else {
@@ -626,6 +915,8 @@ class SecretVaultView extends ItemView {
     this.noteId = '';
     this.noteEditing = false;
     this.noteDraft = null;
+    this.revealedCells = new Set();
+    this.maskCountdownEl = null;
   }
 
   getViewType() {
@@ -649,7 +940,8 @@ class SecretVaultView extends ItemView {
     this.plugin.openViews.add(this);
     if (additionalPanel) {
       this.masked = true;
-      this.plugin.suspendForBackground();
+      // 多面板挂起不走倒计时，必须重新验证主密码
+      this.plugin.suspendForBackground('panel');
     }
     this.render();
     void this.ensureVaultState();
@@ -670,18 +962,36 @@ class SecretVaultView extends ItemView {
     // 笔记编辑草稿与渲染区一并丢弃，避免锁屏后仍能从视图或闭包里拿到明文
     this.noteEditing = false;
     this.noteDraft = null;
+    this.revealedCells.clear();
+    this.maskCountdownEl = null;
     if (this.contentEl) this.contentEl.empty();
   }
 
-  // 切后台/失焦：立刻加遮罩并清屏，回到前台需重新验证主密码
+  // 切后台/失焦：立刻加遮罩并清屏；是否需重新验证由插件按倒计时决定
   maskSensitive() {
     if (!this.plugin.isUnlocked()) return;
     this.masked = true;
     // 挂起时同样丢弃笔记草稿，避免遮罩后仍残留明文副本
     this.noteEditing = false;
     this.noteDraft = null;
+    // 已临时显形的密文列立即回到掩码态，不把明文留在 DOM 或集合里
+    this.revealedCells.clear();
+    this.maskCountdownEl = null;
     if (this.contentEl) this.contentEl.empty();
     this.render();
+  }
+
+  // 倒计时内回到前台：直接恢复可读，不重验主密码
+  resumeSensitive() {
+    this.masked = false;
+    this.revealedCells.clear();
+    this.maskCountdownEl = null;
+    this.render();
+  }
+
+  updateMaskCountdown(seconds) {
+    if (!this.maskCountdownEl) return;
+    this.maskCountdownEl.setText(this.plugin.t('mask_countdown', { seconds }));
   }
 
   async ensureVaultState() {
@@ -784,6 +1094,14 @@ class SecretVaultView extends ItemView {
     const card = mask.createDiv({ cls: 'xsv-mask-card' });
     card.createDiv({ cls: 'xsv-title', text: this.plugin.t('mask_title') });
     card.createDiv({ cls: 'xsv-desc', text: this.plugin.t('mask_desc') });
+    this.maskCountdownEl = null;
+    const remaining = this.plugin.getCountdownRemaining();
+    if (remaining >= 0) {
+      const countdown = card.createDiv({ cls: 'xsv-mask-countdown' });
+      this.maskCountdownEl = countdown;
+      countdown.setText(this.plugin.t('mask_countdown', { seconds: Math.max(0, Math.ceil(remaining / 1000)) }));
+      card.createDiv({ cls: 'xsv-hint', text: this.plugin.t('mask_return_hint') });
+    }
     const password = this.createPasswordField(card, this.plugin.t('label_password'), () => submit());
     const errorEl = card.createDiv({ cls: 'xsv-error' });
     errorEl.setText('');
@@ -925,7 +1243,7 @@ class SecretVaultView extends ItemView {
     if (copyReadOnly) this.renderCopyReadonlyBanner(root);
     else if (readOnly) this.renderConflictBanner(root);
 
-    // 0.3.0 起界面只有笔记：条目列表与 CRUD 入口全部下线，entries 仅作为引用数据源
+    // 0.3.0 起界面只有笔记：条目列表与 CRUD 入口全部下线；0.3.1 起引用语法取消，entries 仅原样保留
     this.renderNotes(root, readOnly);
   }
 
@@ -985,6 +1303,7 @@ class SecretVaultView extends ItemView {
         this.noteId = note.id;
         this.noteEditing = false;
         this.noteDraft = null;
+        this.revealedCells.clear();
         this.render();
       });
     }
@@ -1028,20 +1347,18 @@ class SecretVaultView extends ItemView {
     this.renderMarkdown(body, selected.body);
   }
 
-  // 示例表：优先用现有条目的真实名称，避免引用名称对不上
+  // 示例表：一眼看到明文列、密文列、可点链接与转义后的特殊符号
+  // 密码列含 |、*、_；竖线在源码中写成 \|，渲染与复制都还原为 |
   buildSampleNote() {
-    const names = (this.plugin.entries || []).slice(0, 2).map((entry) => entry.name);
-    const first = names[0] || 'GitHub';
-    const second = names[1] || '阿里云';
     return [
       '# 我的密钥',
       '',
       '## 常用账号',
       '',
-      '| 名称 | 账号 | 密码 |',
-      '| :--- | :--- | :--- |',
-      '| ' + first + ' | {{' + first + '.账号}} | {{' + first + '.密码}} |',
-      '| ' + second + ' | {{' + second + '.账号}} | {{' + second + '.密码}} |',
+      '| 名称 | 账号 | 密码 | 网址 |',
+      '| :--- | :--- | :--- | :--- |',
+      '| GitHub | me@example.com | p@ss\\|w0rd*_2026 | [github.com](https://github.com) |',
+      '| 阿里云 | ops@example.com | P@ss-W0rd_*2026 | [aliyun.com](https://console.aliyun.com) |',
     ].join('\n');
   }
 
@@ -1049,61 +1366,9 @@ class SecretVaultView extends ItemView {
     body.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_editor_hint') });
     const editor = body.createEl('textarea', { cls: 'xsv-note-editor' });
     editor.value = this.noteDraft != null ? this.noteDraft : note.body;
-    // 引用缺失提示：只列出缺了哪些名字，不显示任何值
-    const refHint = body.createDiv({ cls: 'xsv-ref-missing-hint' });
-    const updateRefHint = () => {
-      const missing = this.collectMissingReferences(editor.value);
-      if (!missing.length) {
-        refHint.setText('');
-        if (refHint.style) refHint.style.display = 'none';
-        return;
-      }
-      if (refHint.style) refHint.style.display = '';
-      refHint.setText(this.plugin.t('note_editor_ref_hint', { missing: missing.join('、') }));
-    };
-    updateRefHint();
-
-    // 可用条目名（仅名称，不含值）；超过 8 个时折叠为「共 N 个，展开查看」
-    const namesBar = body.createDiv({ cls: 'xsv-ref-names' });
-    let namesExpanded = false;
-    const renderNames = () => {
-      namesBar.empty();
-      const names = (this.plugin.entries || []).map((item) => item.name);
-      if (!names.length) {
-        namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_no_entries') });
-        return;
-      }
-      if (names.length <= 8) {
-        namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_ref_names', { names: names.join('、') }) });
-        return;
-      }
-      if (!namesExpanded) {
-        namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_ref_names_more', { count: names.length }) });
-        const expandButton = namesBar.createEl('button', {
-          cls: 'xsv-btn xsv-btn-small',
-          text: this.plugin.t('btn_ref_names_expand'),
-        });
-        expandButton.addEventListener('click', () => {
-          namesExpanded = true;
-          renderNames();
-        });
-        return;
-      }
-      namesBar.createDiv({ cls: 'xsv-hint', text: this.plugin.t('note_ref_names', { names: names.join('、') }) });
-      const collapseButton = namesBar.createEl('button', {
-        cls: 'xsv-btn xsv-btn-small',
-        text: this.plugin.t('btn_ref_names_collapse'),
-      });
-      collapseButton.addEventListener('click', () => {
-        namesExpanded = false;
-        renderNames();
-      });
-    };
-    renderNames();
 
     editor.addEventListener('input', () => {
       this.noteDraft = editor.value;
-      updateRefHint();
     });
     const errorEl = body.createDiv({ cls: 'xsv-error' });
     errorEl.setText('');
@@ -1117,7 +1382,6 @@ class SecretVaultView extends ItemView {
       const sample = this.buildSampleNote();
       editor.value = mode === 'replace' ? sample : String(editor.value).replace(/\s+$/, '') + '\n\n' + sample;
       this.noteDraft = editor.value;
-      updateRefHint();
       if (sampleChoice.style) sampleChoice.style.display = 'none';
     };
     const appendButton = sampleActions.createEl('button', {
@@ -1145,7 +1409,6 @@ class SecretVaultView extends ItemView {
       if (!String(editor.value).trim()) {
         editor.value = sample;
         this.noteDraft = sample;
-        updateRefHint();
         return;
       }
       if (sampleChoice.style) sampleChoice.style.display = '';
@@ -1183,14 +1446,14 @@ class SecretVaultView extends ItemView {
   }
 
   // 简易 Markdown 渲染：全部用 DOM API 构建，从不拼接 HTML 字符串
-  renderMarkdown(container, source, ctx) {
+  renderMarkdown(container, source) {
     const lines = String(source || '').replace(/\r\n?/g, '\n').split('\n');
     let index = 0;
     const paragraph = [];
     const flushParagraph = () => {
       if (!paragraph.length) return;
       const p = container.createEl('p');
-      this.renderInline(p, paragraph.join(' '), ctx);
+      this.renderInline(p, paragraph.join(' '));
       paragraph.length = 0;
     };
 
@@ -1206,7 +1469,7 @@ class SecretVaultView extends ItemView {
         flushParagraph();
         const level = heading[1].length;
         const headingEl = container.createEl('h' + level);
-        this.renderInline(headingEl, heading[2].trim(), ctx);
+        this.renderInline(headingEl, heading[2].trim());
         index += 1;
         continue;
       }
@@ -1217,7 +1480,7 @@ class SecretVaultView extends ItemView {
           const item = /^\s*[-*]\s+(.*)$/.exec(lines[index]);
           if (!item) break;
           const li = ul.createEl('li');
-          this.renderInline(li, item[1], ctx);
+          this.renderInline(li, item[1]);
           index += 1;
         }
         continue;
@@ -1229,14 +1492,14 @@ class SecretVaultView extends ItemView {
           const item = /^\s*\d+\.\s+(.*)$/.exec(lines[index]);
           if (!item) break;
           const li = ol.createEl('li');
-          this.renderInline(li, item[1], ctx);
+          this.renderInline(li, item[1]);
           index += 1;
         }
         continue;
       }
       if (this.isPipeTableStart(lines, index)) {
         flushParagraph();
-        index = this.renderPipeTable(container, lines, index, ctx);
+        index = this.renderPipeTable(container, lines, index);
         continue;
       }
       paragraph.push(line.trim());
@@ -1245,11 +1508,120 @@ class SecretVaultView extends ItemView {
     flushParagraph();
   }
 
+  // 按未转义的 | 切分单元格；\| 与 \\ 保留源码写法，交给 unescapeCellText 统一还原
   splitPipeRow(row) {
     let text = String(row).trim();
-    if (text.startsWith('|')) text = text.slice(1);
-    if (text.endsWith('|')) text = text.slice(0, -1);
-    return text.split('|').map((cell) => cell.trim());
+    if (text.startsWith('|') && !text.startsWith('\\|')) text = text.slice(1);
+    if (text.endsWith('|')) {
+      let backslashes = 0;
+      let cursor = text.length - 2;
+      while (cursor >= 0 && text[cursor] === '\\') {
+        backslashes += 1;
+        cursor -= 1;
+      }
+      if (backslashes % 2 === 0) text = text.slice(0, -1);
+    }
+    const cells = [];
+    let current = '';
+    let index = 0;
+    while (index < text.length) {
+      const char = text[index];
+      if (char === '\\' && index + 1 < text.length) {
+        const next = text[index + 1];
+        if (next === '|' || next === '\\') {
+          current += char + next;
+          index += 2;
+          continue;
+        }
+      }
+      if (char === '|') {
+        cells.push(current.trim());
+        current = '';
+        index += 1;
+        continue;
+      }
+      current += char;
+      index += 1;
+    }
+    cells.push(current.trim());
+    return cells;
+  }
+
+  cellText(rawCell) {
+    return unescapeCellText(String(rawCell == null ? '' : rawCell).trim());
+  }
+
+  // 单元格唯一例外：整格是 Markdown 链接或裸 http/https URL 时渲染为可点链接
+  cellLink(value) {
+    const mdLink = /^\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)$/i.exec(value);
+    if (mdLink) return { label: mdLink[1], url: mdLink[2] };
+    if (/^https?:\/\/[^\s]+$/i.test(value)) return { label: value, url: value };
+    return null;
+  }
+
+  isSensitiveHeader(text) {
+    return this.plugin.getColumnMode(text) === 'secret';
+  }
+
+  renderCellLink(td, link) {
+    const anchor = td.createEl('a', { text: link.label });
+    anchor.setAttribute('href', link.url);
+    anchor.setAttribute('target', '_blank');
+    anchor.setAttribute('rel', 'noopener noreferrer');
+    anchor.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (typeof window !== 'undefined' && typeof window.open === 'function') {
+        window.open(link.url, '_blank', 'noopener,noreferrer');
+      }
+    });
+  }
+
+  attachCellCopy(td, value) {
+    td.addClass('xsv-cell-copy');
+    td.addEventListener('click', (event) => {
+      const target = event && event.target;
+      if (target && typeof target.closest === 'function' && (target.closest('a') || target.closest('button'))) {
+        return;
+      }
+      const link = this.cellLink(value);
+      if (link) {
+        window.open(link.url, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      void this.plugin.copySecret(value).then((copied) => {
+        if (copied) new Notice(this.plugin.t('notice_cell_copied'), 2000);
+      });
+    });
+  }
+
+  // 密文列：默认掩码，眼睛按钮临时显示；点击单元格本体仍复制真实值
+  renderSensitiveCell(td, value, cellKey) {
+    td.addClass('xsv-cell-secret');
+    const textEl = td.createSpan({ cls: 'xsv-secret-text' });
+    const revealed = this.revealedCells.has(cellKey);
+    textEl.setText(revealed && value ? value : MASK_PLACEHOLDER);
+    if (!value) return;
+    this.attachCellCopy(td, value);
+    const eye = td.createEl('button', {
+      cls: 'xsv-eye-btn' + (revealed ? ' xsv-eye-btn-active' : ''),
+      text: '👁',
+    });
+    eye.setAttribute('title', this.plugin.t(revealed ? 'btn_eye_hide' : 'btn_eye_show'));
+    eye.addEventListener('click', (event) => {
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      const key = cellKey;
+      if (this.revealedCells.has(key)) {
+        this.revealedCells.delete(key);
+        textEl.setText(MASK_PLACEHOLDER);
+        eye.setAttribute('title', this.plugin.t('btn_eye_show'));
+        eye.removeClass('xsv-eye-btn-active');
+        return;
+      }
+      this.revealedCells.add(key);
+      textEl.setText(value);
+      eye.setAttribute('title', this.plugin.t('btn_eye_hide'));
+      eye.addClass('xsv-eye-btn-active');
+    });
   }
 
   isPipeTableStart(lines, index) {
@@ -1261,8 +1633,10 @@ class SecretVaultView extends ItemView {
     return separator.every((cell) => /^:?-{3,}:?$/.test(cell));
   }
 
-  renderPipeTable(container, lines, start, ctx) {
+  renderPipeTable(container, lines, start) {
     const headerCells = this.splitPipeRow(lines[start]);
+    const headerTexts = headerCells.map((cell) => this.cellText(cell));
+    const sensitiveColumns = headerTexts.map((text) => this.isSensitiveHeader(text));
     const separatorCells = this.splitPipeRow(lines[start + 1]);
     const alignments = separatorCells.map((cell) => {
       const left = cell.startsWith(':');
@@ -1278,45 +1652,41 @@ class SecretVaultView extends ItemView {
     for (let col = 0; col < headerCells.length; col += 1) {
       const th = headRow.createEl('th');
       if (alignments[col] && th.style) th.style.textAlign = alignments[col];
-      this.renderInline(th, headerCells[col], ctx);
+      // 表头同样按纯文本显示，不做行内 Markdown 或引用解析
+      this.appendInlineText(th, headerTexts[col]);
     }
     const tbody = table.createEl('tbody');
     let index = start + 2;
+    let rowIndex = 0;
     while (index < lines.length && lines[index].trim() && lines[index].indexOf('|') >= 0) {
       const cells = this.splitPipeRow(lines[index]);
       const tr = tbody.createEl('tr');
       for (let col = 0; col < headerCells.length; col += 1) {
-        const rawCell = String(cells[col] || '').trim();
         const td = tr.createEl('td');
         if (alignments[col] && td.style) td.style.textAlign = alignments[col];
-        this.renderInline(td, cells[col] || '', ctx);
-        // 单元格即复制单元：表头不参与，空单元格不注册点击
-        if (rawCell) {
-          td.addClass('xsv-cell-copy');
-          td.addEventListener('click', (event) => {
-            const target = event && event.target;
-            if (
-              target &&
-              typeof target.closest === 'function' &&
-              (target.closest('a') || target.closest('button'))
-            ) {
-              return;
-            }
-            // 单元格整体是链接：交给系统浏览器，不复制
-            const mdLink = /^\[[^\]]+\]\((https?:\/\/[^)\s]+)\)$/.exec(rawCell);
-            const bareUrl = /^https?:[\/]{2}[^\s]+$/i.test(rawCell) ? rawCell : '';
-            const url = mdLink ? mdLink[1] : bareUrl;
-            if (url) {
-              window.open(url, '_blank', 'noopener,noreferrer');
-              return;
-            }
-            void this.plugin.copySecret(rawCell).then((copied) => {
-              if (copied) new Notice(this.plugin.t('notice_cell_copied'), 2000);
-            });
-          });
+        const value = this.cellText(cells[col] || '');
+        const cellKey = [this.noteId, rowIndex, col].join(':');
+        if (sensitiveColumns[col]) {
+          this.renderSensitiveCell(td, value, cellKey);
+          continue;
+        }
+        if (value) {
+          const link = this.cellLink(value);
+          if (link) this.renderCellLink(td, link);
+          else this.appendInlineText(td, value);
+          // 单元格即复制单元：表头不参与，链接格点击开浏览器，空单元格不注册点击
+          this.attachCellCopy(td, value);
         }
       }
       index += 1;
+      rowIndex += 1;
+    }
+    const sensitiveCount = sensitiveColumns.filter(Boolean).length;
+    if (sensitiveCount > 0) {
+      tableWrap.createDiv({
+        cls: 'xsv-sensitive-note',
+        text: this.plugin.t('notice_sensitive_columns', { count: sensitiveCount }),
+      });
     }
     return index;
   }
@@ -1327,9 +1697,10 @@ class SecretVaultView extends ItemView {
     else parent.createSpan({ text: String(text) });
   }
 
-  renderInline(parent, text, ctx) {
+  renderInline(parent, text) {
     let rest = String(text == null ? '' : text);
-    const tokenRe = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|\{\{[^{}]+\}\})/;
+    // 0.3.1 起不再解析 {{条目.字段}}，花括号按字面文本显示
+    const tokenRe = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\))/;
     while (rest) {
       const match = tokenRe.exec(rest);
       if (!match) {
@@ -1339,11 +1710,11 @@ class SecretVaultView extends ItemView {
       if (match.index > 0) this.appendInlineText(parent, rest.slice(0, match.index));
       const token = match[0];
       rest = rest.slice(match.index + token.length);
-      this.renderInlineToken(parent, token, ctx);
+      this.renderInlineToken(parent, token);
     }
   }
 
-  renderInlineToken(parent, token, ctx) {
+  renderInlineToken(parent, token) {
     if (token.startsWith('**') && token.endsWith('**')) {
       const strong = parent.createEl('strong');
       this.appendInlineText(strong, token.slice(2, -2));
@@ -1373,70 +1744,42 @@ class SecretVaultView extends ItemView {
       });
       return;
     }
-    const ref = /^\{\{([^{}]+)\}\}$/.exec(token);
-    if (ref) {
-      const resolved = this.resolveReference(ref[1], ctx && ctx.excludeName);
-      if (resolved && resolved.self) {
-        parent.createSpan({
-          cls: 'xsv-ref-missing',
-          text: this.plugin.t('note_ref_missing', { name: resolved.name }),
-        });
-        parent.createSpan({ cls: 'xsv-ref-selfnote', text: this.plugin.t('note_ref_self') });
-        return;
-      }
-      if (!resolved) {
-        parent.createSpan({
-          cls: 'xsv-ref-missing',
-          text: this.plugin.t('note_ref_missing', { name: ref[1].trim() }),
-        });
-        return;
-      }
-      const button = parent.createEl('button', {
-        cls: 'xsv-btn xsv-btn-small xsv-ref',
-        text: '•••••• ' + resolved.name,
-      });
-      button.setAttribute('title', this.plugin.t('note_ref_copy', { name: resolved.name }));
-      button.addEventListener('click', () => void this.plugin.copySecret(resolved.value));
-      return;
-    }
+    // 其它 token（含 {{...}}，因为不在 tokenRe 中）按字面文本输出
     this.appendInlineText(parent, token);
   }
 
-  collectMissingReferences(source) {
-    const tokens = String(source == null ? '' : source).match(/\{\{[^{}\n]+\}\}/g) || [];
-    const missing = [];
-    for (const token of tokens) {
-      const name = token.slice(2, -2).trim();
-      if (!name) continue;
-      if (!this.resolveReference(name) && missing.indexOf(name) < 0) missing.push(name);
-    }
-    return missing;
+
+}
+
+/* ------------------------------------------------------------------ */
+/* 简单确认弹窗（恢复默认列规则等二次确认）                             */
+/* ------------------------------------------------------------------ */
+class ConfirmModal extends Modal {
+  constructor(app, title, message, confirmLabel, cancelLabel, onConfirm) {
+    super(app);
+    this.confirmTitle = title;
+    this.confirmMessage = message;
+    this.confirmLabel = confirmLabel;
+    this.cancelLabel = cancelLabel;
+    this.onConfirm = onConfirm;
   }
 
-  resolveReference(expression, excludeName) {
-    const cleaned = String(expression == null ? '' : expression).trim();
-    if (!cleaned) return null;
-    // 先按完整名称匹配（条目名本身可能含点号）
-    const exact = this.plugin.entries.filter((entry) => entry.name === cleaned)[0];
-    if (exact && excludeName && exact.name === excludeName) return { name: exact.name, self: true };
-    if (exact && exact.content) return { name: exact.name, field: '密码', value: exact.content };
-    const dot = cleaned.lastIndexOf('.');
-    if (dot > 0) {
-      const field = cleaned.slice(dot + 1);
-      if (field === '密码' || field === '账号') {
-        const name = cleaned.slice(0, dot);
-        const entry = this.plugin.entries.filter((item) => item.name === name)[0];
-        if (entry && excludeName && entry.name === excludeName) return { name: entry.name, self: true };
-        if (entry) {
-          const value = field === '账号' ? entry.name : entry.content;
-          if (value) return { name: entry.name, field, value };
-        }
-      }
-    }
-    return null;
+  onOpen() {
+    this.titleEl.setText(this.confirmTitle);
+    this.contentEl.createEl('p', { text: this.confirmMessage });
+    const actions = this.contentEl.createDiv({ cls: 'xsv-modal-actions' });
+    const cancel = actions.createEl('button', { cls: 'xsv-btn', text: this.cancelLabel });
+    cancel.addEventListener('click', () => this.close());
+    const confirm = actions.createEl('button', { cls: 'xsv-btn xsv-btn-danger', text: this.confirmLabel });
+    confirm.addEventListener('click', () => {
+      this.close();
+      if (typeof this.onConfirm === 'function') this.onConfirm();
+    });
   }
 
-
+  onClose() {
+    this.contentEl.empty();
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1466,6 +1809,11 @@ class XUSecretVault extends Plugin {
   hiddenAt = 0;
   hiddenAtWall = 0;
   idleDeadlineWall = 0;
+  countdownDeadline = 0;
+  countdownDeadlineWall = 0;
+  countdownSeconds = 0;
+  countdownTimer = 0;
+  suspendReason = '';
   suspended = false;
   conflictPending = false;
   conflictPath = '';
@@ -1499,7 +1847,8 @@ class XUSecretVault extends Plugin {
     this.cryptoApi = getWebCrypto();
 
     this.registerView(VIEW_TYPE, (leaf) => new SecretVaultView(leaf, this));
-    this.addSettingTab(new SecretVaultSettingTab(this.app, this));
+    this.settingTab = new SecretVaultSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
 
     this.addRibbonIcon('lock', this.t('cmd_open'), () => {
       void this.openVaultView();
@@ -1529,12 +1878,13 @@ class XUSecretVault extends Plugin {
     // 启动清理：删除上次异常退出可能留下的本插件临时密文（*.tmp*）
     void this.cleanupStaleTempFiles();
 
-    // 切后台 / 失焦：立即遮罩并清屏；hidden 超过 60 秒直接锁定
+    // 切后台 / 失焦：立即遮罩并清屏；按设置倒计时锁定，hidden 超过 60 秒仍强制锁定
     if (typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') {
       this.registerDomEvent(document, 'visibilitychange', () => this.handleVisibilityChange());
     }
     if (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function') {
       this.registerDomEvent(window, 'blur', () => this.handleWindowBlur());
+      this.registerDomEvent(window, 'focus', () => this.handleWindowFocus());
     }
 
     this.app.workspace.onLayoutReady(() => {
@@ -1587,10 +1937,124 @@ class XUSecretVault extends Plugin {
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     if (this.settings.language !== 'en') this.settings.language = 'zh';
+    this.settings.backgroundLockSeconds = normalizeBackgroundSeconds(this.settings.backgroundLockSeconds);
+    // 只保留 { name, mode }；旧格式/脏数据自动归一化，绝不携带任何密码或笔记内容
+    this.settings.columnRules = normalizeColumnRules(this.settings.columnRules);
+  }
+
+  getBackgroundLockSeconds() {
+    return normalizeBackgroundSeconds(this.settings.backgroundLockSeconds);
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  /* ---------------- 列显示规则 ---------------- */
+
+  getColumnRules() {
+    return normalizeColumnRules(this.settings.columnRules);
+  }
+
+  // 精确匹配 > 包含匹配（取最长的规则名）> 未命中按明文
+  getColumnMode(header) {
+    const text = String(header == null ? '' : header).trim().toLowerCase();
+    if (!text) return 'plain';
+    const rules = this.getColumnRules();
+    const exact = rules.filter((rule) => rule.name.toLowerCase() === text)[0];
+    if (exact) return exact.mode;
+    let best = null;
+    for (const rule of rules) {
+      const name = rule.name.toLowerCase();
+      if (text.indexOf(name) >= 0 && (!best || name.length > best.name.length)) {
+        best = { name, mode: rule.mode };
+      }
+    }
+    return best ? best.mode : 'plain';
+  }
+
+  async saveColumnRules(rules) {
+    this.settings.columnRules = normalizeColumnRules(rules);
+    await this.saveSettings();
+    // 立即重渲染当前笔记表格，不要求重启或重新解锁
+    this.refreshViews();
+    return this.settings.columnRules;
+  }
+
+  async addColumnRule(name, mode) {
+    const cleanName = normalizeRuleName(name);
+    if (!cleanName) {
+      new Notice(this.t('notice_rule_name_empty'), 3000);
+      return { ok: false, reason: 'empty' };
+    }
+    const normalizedMode = COLUMN_RULE_MODES.indexOf(mode) >= 0 ? mode : 'secret';
+    const rules = this.getColumnRules();
+    const existing = rules.filter((rule) => rule.name.toLowerCase() === cleanName.toLowerCase())[0];
+    if (existing) {
+      existing.mode = normalizedMode;
+      await this.saveColumnRules(rules);
+      return { ok: true, merged: true, rules: this.settings.columnRules };
+    }
+    if (rules.length >= COLUMN_RULE_LIMIT) {
+      new Notice(this.t('notice_rule_limit', { limit: COLUMN_RULE_LIMIT }), 4000);
+      return { ok: false, reason: 'limit' };
+    }
+    rules.push({ name: cleanName, mode: normalizedMode });
+    await this.saveColumnRules(rules);
+    return { ok: true, rules: this.settings.columnRules };
+  }
+
+  async updateColumnRule(index, patch) {
+    const rules = this.getColumnRules();
+    if (index < 0 || index >= rules.length) return { ok: false, reason: 'missing' };
+    const target = rules[index];
+    if (patch && patch.name !== undefined) {
+      const cleanName = normalizeRuleName(patch.name);
+      if (!cleanName) {
+        new Notice(this.t('notice_rule_name_empty'), 3000);
+        return { ok: false, reason: 'empty' };
+      }
+      target.name = cleanName;
+    }
+    if (patch && patch.mode !== undefined) {
+      target.mode = COLUMN_RULE_MODES.indexOf(patch.mode) >= 0 ? patch.mode : 'plain';
+    }
+    await this.saveColumnRules(rules);
+    return { ok: true, rules: this.settings.columnRules };
+  }
+
+  async deleteColumnRule(index) {
+    const rules = this.getColumnRules();
+    if (index < 0 || index >= rules.length) return { ok: false, reason: 'missing' };
+    rules.splice(index, 1);
+    await this.saveColumnRules(rules);
+    return { ok: true, rules: this.settings.columnRules };
+  }
+
+  async applyDefaultColumnRules() {
+    this.settings.columnRules = cloneDefaultColumnRules();
+    await this.saveSettings();
+    this.refreshViews();
+    new Notice(this.t('notice_rules_restored'), 3000);
+    return this.settings.columnRules;
+  }
+
+  // 恢复默认必须二次确认，避免误清自定义规则
+  requestRestoreDefaultColumnRules(onDone) {
+    this.confirmModal = new ConfirmModal(
+      this.app,
+      this.t('btn_restore_default_rules'),
+      this.t('confirm_restore_rules'),
+      this.t('btn_restore_default_rules'),
+      this.t('btn_cancel'),
+      () => {
+        void this.applyDefaultColumnRules().then(() => {
+          if (typeof onDone === 'function') onDone();
+        });
+      }
+    );
+    this.confirmModal.open();
+    return this.confirmModal;
   }
 
   normalizeVaultPath(raw) {
@@ -2358,6 +2822,8 @@ class XUSecretVault extends Plugin {
       this.contentVersion = payload.contentVersion;
       this.vaultState = 'present';
       this.suspended = false;
+      this.suspendReason = '';
+      this.stopCountdown();
       this.hiddenAt = 0;
       this.hiddenAtWall = 0;
       this.knownBlobHash = await this.hashText(text);
@@ -2442,6 +2908,8 @@ class XUSecretVault extends Plugin {
       this.hiddenAt = 0;
       this.hiddenAtWall = 0;
       this.suspended = false;
+      this.suspendReason = '';
+      this.stopCountdown();
       this.unmaskAllViews();
       this.resetIdleTimer();
       this.refreshViews();
@@ -2473,7 +2941,9 @@ class XUSecretVault extends Plugin {
     this.lastReverifyError = '';
     this.hiddenAt = 0;
     this.hiddenAtWall = 0;
+    this.stopCountdown();
     this.suspended = false;
+    this.suspendReason = '';
     this.conflictPending = false;
     this.conflictPath = '';
     this.selectedVaultPath = '';
@@ -2703,6 +3173,7 @@ class XUSecretVault extends Plugin {
       const view = leaf && leaf.view;
       if (!view || typeof view !== 'object') continue;
       view.masked = false;
+      if (view.revealedCells && typeof view.revealedCells.clear === 'function') view.revealedCells.clear();
     }
   }
 
@@ -2718,12 +3189,121 @@ class XUSecretVault extends Plugin {
     }
   }
 
-  suspendForBackground() {
+  countdownActive() {
+    return !!(this.countdownDeadline || this.countdownDeadlineWall);
+  }
+
+  // 双时钟取大：合盖休眠后墙钟已前进，单调钟可能停摆；两者任一超时即视为到点
+  getCountdownRemaining() {
+    if (!this.countdownActive()) return -1;
+    const monoRemaining = this.countdownDeadline ? this.countdownDeadline - this.nowMs() : 0;
+    const wallRemaining = this.countdownDeadlineWall ? this.countdownDeadlineWall - Date.now() : 0;
+    return Math.max(monoRemaining, wallRemaining);
+  }
+
+  startCountdown(seconds) {
+    this.stopCountdown();
+    if (seconds <= 0) return;
+    const span = seconds * 1000;
+    this.countdownSeconds = seconds;
+    this.countdownDeadline = this.nowMs() + span;
+    this.countdownDeadlineWall = Date.now() + span;
+    this.countdownTimer = globalThis.setInterval(() => this.tickCountdown(), 1000);
+  }
+
+  stopCountdown() {
+    if (this.countdownTimer) {
+      globalThis.clearInterval(this.countdownTimer);
+      this.countdownTimer = 0;
+    }
+    this.countdownDeadline = 0;
+    this.countdownDeadlineWall = 0;
+    this.countdownSeconds = 0;
+  }
+
+  tickCountdown() {
+    if (!this.isUnlocked() || !this.suspended) {
+      this.stopCountdown();
+      return;
+    }
+    const remaining = this.getCountdownRemaining();
+    if (remaining <= 0) {
+      this.finishCountdownLock();
+      return;
+    }
+    this.updateCountdownViews(remaining);
+  }
+
+  updateCountdownViews(remainingMs) {
+    const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+    try {
+      const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+      for (const leaf of leaves) {
+        const view = leaf && leaf.view;
+        if (view && view.masked && typeof view.updateMaskCountdown === 'function') {
+          view.updateMaskCountdown(seconds);
+        }
+      }
+    } catch (error) {
+      /* ignore */
+    }
+  }
+
+  finishCountdownLock() {
+    this.stopCountdown();
+    this.lock();
+    new Notice(this.t('notice_countdown_locked'), 6000);
+  }
+
+  // reason='background'：倒计时内回来自动恢复；reason='panel'：多面板需重新验证
+  suspendForBackground(reason) {
     if (!this.isUnlocked()) return;
+    const nextReason = reason || 'background';
+    // 多面板的重验尚未完成时，不被后续失焦倒计时绕过
+    if (this.suspended && this.suspendReason === 'panel' && nextReason === 'background') return;
     this.suspended = true;
+    this.suspendReason = nextReason;
+    const seconds = nextReason === 'panel' ? 0 : this.getBackgroundLockSeconds();
+    if (seconds <= 0) {
+      // 立即 = 原来的严格行为：不保留会话，回来必须重输主密码
+      if (nextReason !== 'panel') {
+        this.lock();
+        new Notice(this.t('notice_locked_done'), 3000);
+        return;
+      }
+      this.stopCountdown();
+    } else {
+      this.startCountdown(seconds);
+    }
     this.clearViewScreens();
     this.maskAllViews();
     this.refreshViews();
+  }
+
+  resumeFromBackground() {
+    if (!this.isUnlocked() || !this.suspended) return;
+    this.suspended = false;
+    this.suspendReason = '';
+    this.hiddenAt = 0;
+    this.hiddenAtWall = 0;
+    this.stopCountdown();
+    this.unmaskAllViews();
+    this.resetIdleTimer();
+    this.refreshViews();
+  }
+
+  // 回到前台：倒计时内直接恢复；已到点则锁定；多面板挂起保持遮罩等待重验
+  handleForeground() {
+    if (!this.isUnlocked() || !this.suspended) return;
+    // 多面板重验未完成：保持遮罩，必须验证主密码
+    if (this.suspendReason === 'panel') return;
+    const remaining = this.getCountdownRemaining();
+    if (remaining < 0) return;
+    if (remaining <= 0) {
+      this.finishCountdownLock();
+      return;
+    }
+    this.resumeFromBackground();
   }
 
   handleVisibilityChange() {
@@ -2731,7 +3311,7 @@ class XUSecretVault extends Plugin {
     if (hidden) {
       this.hiddenAt = this.hiddenAt || this.nowMs();
       this.hiddenAtWall = this.hiddenAtWall || Date.now();
-      this.suspendForBackground();
+      this.suspendForBackground('background');
       return;
     }
     const elapsed = Math.max(
@@ -2740,21 +3320,32 @@ class XUSecretVault extends Plugin {
     );
     this.hiddenAt = 0;
     this.hiddenAtWall = 0;
-    if (elapsed >= HIDDEN_LOCK_MS) {
+    if (this.isUnlocked() && elapsed >= HIDDEN_LOCK_MS) {
       this.lockFromBackground();
       return;
     }
-    // 未超过 60 秒也保持遮罩，必须重新验证主密码才能继续查看
-    if (this.isUnlocked()) this.suspendForBackground();
+    this.handleForeground();
   }
 
   handleWindowBlur() {
     if (typeof document !== 'undefined' && document && document.hidden) return;
-    this.suspendForBackground();
+    this.hiddenAt = this.hiddenAt || this.nowMs();
+    this.hiddenAtWall = this.hiddenAtWall || Date.now();
+    this.suspendForBackground('background');
+  }
+
+  handleWindowFocus() {
+    if (typeof document !== 'undefined' && document && document.hidden) return;
+    this.handleForeground();
   }
 
   checkAutoLock() {
     if (!this.isUnlocked()) return;
+    // 三套机制取最早触发者：失焦倒计时、后台 60 秒、空闲自动锁
+    if (this.suspended && this.countdownActive() && this.getCountdownRemaining() <= 0) {
+      this.finishCountdownLock();
+      return;
+    }
     // 取墙钟与单调钟的较大者：休眠/回拨任一异常时另一种仍能兜底
     const hiddenElapsed = Math.max(
       this.hiddenAt ? this.nowMs() - this.hiddenAt : 0,
@@ -2764,10 +3355,14 @@ class XUSecretVault extends Plugin {
       this.lockFromBackground();
       return;
     }
+    if (this.suspended && this.countdownActive()) {
+      this.updateCountdownViews(this.getCountdownRemaining());
+    }
     const idleExpired =
       (this.idleDeadline > 0 && this.nowMs() >= this.idleDeadline) ||
       (this.idleDeadlineWall > 0 && Date.now() >= this.idleDeadlineWall);
     if (idleExpired) {
+      this.stopCountdown();
       this.lock();
       new Notice(this.t('notice_auto_locked'), 6000);
     }
