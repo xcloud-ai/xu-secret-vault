@@ -448,6 +448,11 @@ recoveryCode{ kdf, wrappedMasterKey }         // 恢复码 → 恢复 KEK（100,
 - 自动锁定由 15 秒一次的后台检查触发；任意面板交互（含弹窗输入）会重置空闲计时。
 - 插件不注册网络请求、不访问外部服务，日志统一使用 `[xu-secret-vault]` 前缀。
 
+## 仓库
+
+- 源码与问题反馈：<https://github.com/xcloud-ai/xu-secret-vault>
+- 版本发布：[Releases](https://github.com/xcloud-ai/xu-secret-vault/releases)
+
 ## 许可证
 
 MIT License - Copyright (c) 2026 旭说
